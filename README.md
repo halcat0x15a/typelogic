@@ -1,0 +1,1 @@
+[![Build Status](https://travis-ci.org/halcat0x15a/typelogic.png)](https://travis-ci.org/halcat0x15a/typelogic)
