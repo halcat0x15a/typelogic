@@ -24,7 +24,8 @@
          (check '(fn [a] a)) '[:typelogic.lisp/-> [_0] _0]
          (check '(fn [a b] b)) '[:typelogic.lisp/-> [_0 _1] _1]
          (check '(fn [a] (fn [a] a)))
-         '[:typelogic.lisp/-> [_0] [:typelogic.lisp/-> [_1] _1]]))
+         '[:typelogic.lisp/-> [_0] [:typelogic.lisp/-> [_1] _1]]
+         (check '(fn [^String a] a)) [:typelogic.lisp/-> [String] String]))
   (testing "app"
     (are [x y] (= x y)
          (check '((fn [] ""))) String

@@ -3,6 +3,8 @@
   (:require [clojure.core.logic :refer :all]
             [clojure.core.logic.dcg :refer :all]))
 
+(def ^:dynamic *classes*)
+
 (declare ann)
 
 (defne -if [ctx consequence alternative type]
@@ -29,13 +31,19 @@
 (defna bind [ctx ctx' names types]
   ([_ ctx [] []])
   ([_ [[name type] . ctx''] [name . names'] [type . types']]
-     (bind ctx ctx'' names' types')))
+     (conda [(project [name]
+               (!= nil (:tag (meta name)))
+               (== type (*classes* (:tag (meta name)))))
+             (bind ctx ctx'' names' types')]
+            [(bind ctx ctx'' names' types')])))     
 
 (defna form [ctx exprs types]
   ([_ [] []])
   ([_ [expr . exprs'] [type . types']]
      (ann ctx expr type)
      (form ctx exprs' types')))
+
+(defna app [operator operands type] ([[::-> parameters type] parameters _]))
 
 (defna ann [ctx expr type]
   ([_ ['fn parameters body] [::-> types return]]
@@ -48,13 +56,14 @@
   ([_ ['do . exprs] _] (-do ctx exprs type))
   ([_ [[::-> parameters type] . parameters] _])
   ([_ [operator . operands] _]
-     (fresh [type' types' expr']
+     (fresh [type' types']
        (ann ctx operator type')
        (form ctx operands types')
-       (conso type' types' expr')
-       (ann ctx expr' type)))
+       (app type' types' type)))
   ([[[name type] . _] name _])
   ([[_ . ctx'] _ _] (ann ctx' expr type))
   ([_ _ _] (project [expr] (== type (class expr)))))
 
-(defn check [expr] (first (run* [type] (ann [] expr type))))
+(defn check [expr]
+  (binding [*classes* (ns-imports *ns*)]
+    (first (run* [type] (ann [] expr type)))))
