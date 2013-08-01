@@ -3,8 +3,6 @@
   (:require [clojure.core.logic :refer :all]
             [clojure.core.logic.dcg :refer :all]))
 
-(def ^:dynamic *classes*)
-
 (declare ann)
 
 (defne -if [ctx consequence alternative type]
@@ -31,11 +29,12 @@
 (defna bind [ctx ctx' names types]
   ([_ ctx [] []])
   ([_ [[name type] . ctx''] [name . names'] [type . types']]
-     (conda [(project [name]
-               (!= nil (:tag (meta name)))
-               (== type (*classes* (:tag (meta name)))))
-             (bind ctx ctx'' names' types')]
-            [(bind ctx ctx'' names' types')])))     
+     (fresh [tag]
+       (project [name] (== tag (some-> name meta :tag resolve)))
+       (conda [(pred tag class?)
+               (== type tag)
+               (bind ctx ctx'' names' types')]
+              [(bind ctx ctx'' names' types')]))))
 
 (defna form [ctx exprs types]
   ([_ [] []])
@@ -46,24 +45,26 @@
 (defna app [operator operands type] ([[::-> parameters type] parameters _]))
 
 (defna ann [ctx expr type]
-  ([_ ['fn parameters body] [::-> types return]]
-    (fresh [ctx']
-      (bind ctx ctx' parameters types)
-      (ann ctx' body return)))
-  ([_ ['if _ consequence] _] (-if ctx consequence nil type))
-  ([_ ['if _ consequence alternative] _] (-if ctx consequence alternative type))
-  ([_ ['let bindings body] _] (-let ctx bindings body type))
-  ([_ ['do . exprs] _] (-do ctx exprs type))
-  ([_ [[::-> parameters type] . parameters] _])
-  ([_ [operator . operands] _]
+  ([[[name type]] ['def name expr'] _] (ann ctx expr' type))
+  ([[] ['fn parameters body] [::-> types return]]
+     (fresh [ctx']
+       (bind ctx ctx' parameters types)
+       (ann ctx' body return)))
+  ([[] ['if _ consequence] _] (-if ctx consequence nil type))
+  ([[] ['if _ consequence alternative] _] (-if ctx consequence alternative type))
+  ([[] ['let bindings body] _] (-let ctx bindings body type))
+  ([[] ['do . exprs] _] (-do ctx exprs type))
+  ([[] [operator . operands] _]
      (fresh [type' types']
        (ann ctx operator type')
        (form ctx operands types')
        (app type' types' type)))
   ([[[name type] . _] name _])
   ([[_ . ctx'] _ _] (ann ctx' expr type))
-  ([_ _ _] (project [expr] (== type (class expr)))))
+  ([[] _ _]
+     (project [expr]
+       (== false (class? expr))
+       (== type (class expr)))))
 
 (defn check [expr]
-  (binding [*classes* (ns-imports *ns*)]
-    (first (run* [type] (ann [] expr type)))))
+  (first (run 1 [q] (fresh [env type] (ann env expr type) (== q [env type])))))
