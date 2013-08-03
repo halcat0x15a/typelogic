@@ -37,5 +37,9 @@
     (are [expr type] (= (check expr) type)
          '(. clojure.lang.Numbers (inc 0)) #{Number}
          '(. clojure.lang.RT (first [""])) #{Object}))
+  (testing "new"
+    (are [expr type] (= (check expr) type)
+         '(new Object) #{Object}
+         '(new String "") #{String}))
   (testing "def"
     (is (= (check '(def a "")) #{[:typelogic.lisp/def 'a String]}))))

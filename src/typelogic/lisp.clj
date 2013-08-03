@@ -96,6 +96,7 @@
        (form ctx arguments arguments')
        (project [instance method]
          (attempt (reflection instance method) arguments' type))))
+  ([_ ['new type' . _] _] (project [type'] (== type (resolve type'))))
   ([_ [operator . operands] _]
      (fresh [operator' operands']
        (ann ctx operator operator')
