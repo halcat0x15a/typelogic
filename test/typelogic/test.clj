@@ -6,17 +6,17 @@
   (testing "if"
     (are [expr type] (= (check expr) type)
          '(if true "foo" "bar") #{String}
-         '(if true "" 0) #{String Long}
+         '(if true "" 0) #{String Long 'long}
          '(if true "") #{String nil}))
   (testing "do"
     (are [expr type] (= (check expr) type)
          '(do "") #{String}
          '(do) #{nil}
-         '(do "" 0) #{Long}))
+         '(do "" 0) #{Long 'long}))
   (testing "let"
     (are [expr type] (= (check expr) type)
          '(let [a ""] a) #{String}
-         '(let [] 0) #{Long}
+         '(let [] 0) #{Long 'long}
          '(let [a "" b true] b) #{Boolean}))
   (testing "fn"
     (are [expr type] (= (check expr) type)
@@ -27,10 +27,14 @@
          #{'[:typelogic.lisp/-> [_0] [:typelogic.lisp/-> [_1] _1]]}
          '(fn [^String a] a) #{[:typelogic.lisp/-> [String] String]}
          '(fn [^java.lang.String a] a) #{[:typelogic.lisp/-> [String] String]}))
+  (testing "quote"
+    (are [expr type] (= (check expr) type)
+         '(quote 0) #{Long 'long}
+         '(quote (fn [a] a)) #{clojure.lang.LazySeq}))
   (testing "app"
     (are [expr type] (= (check expr) type)
          '((fn [] "")) #{String}
-         '((fn [a] a) 0) #{Long}
+         '((fn [a] a) 0) #{Long 'long}
          '((fn [a b] b) 0 true) #{Boolean}
          '((fn [^Object a] a) "") #{Object}))
   (testing "dot"
@@ -42,4 +46,4 @@
          '(new Object) #{Object}
          '(new String "") #{String}))
   (testing "def"
-    (is (= (check '(def a "")) #{[:typelogic.lisp/def 'a String]}))))
+    (is (= (check '(def a "")) #{String}))))
