@@ -8,25 +8,27 @@
 
 (def ^:dynamic *depth* 10)
 
-(defmacro error [s]
-  `(fn [a#] (prn ~s) nil))
-
 (declare ann)
+
+(defna tag [tag type]
+  (['long _] (== type Long/TYPE))
+  (['double _] (== type Double/TYPE))
+  ([_ _]
+     (pred tag symbol?)
+     (is type tag resolve)))
 
 (defna bind [ctx ctx' names types]
   ([_ ctx [] []])
-  ([_ [[name type] . ctx''] ['& . _] [type]] (== type clojure.lang.ArraySeq))
+  ([_ [[name type] . ctx''] ['& _] [type]] (== type clojure.lang.ArraySeq))
   ([_ [[name type] . ctx''] [name . names'] [type . types']]
-     (conda [(conda [(is type name #(some-> % meta :tag resolve))
-                     (pred type class?)])
-             (bind ctx ctx'' names' types')]
-            [(bind ctx ctx'' names' types')])))
+     (bind ctx ctx'' names' types')
+     (conda [(pred name #(contains? (meta %) :tag))
+             (project [name] (tag (-> name meta :tag) type))]
+            [s#])))
 
 (defn ann-if [ctx consequence alternative type]
-  (conde [(conda [(ann ctx consequence type)
-                  (ann ctx alternative type)])]
-         [(conde [(ann ctx consequence type)]
-                 [(ann ctx alternative type)])]))
+  (conde [(ann ctx consequence type)]
+         [(ann ctx alternative type)]))
 
 (defna ann-let [ctx bindings body type]
   ([_ [] _ _] (ann ctx body type))
@@ -54,17 +56,16 @@
      (ann ctx expr type)
      (form ctx exprs' types')))
 
-(defna subtyping [subtypes supertypes]
+(defna subtyping [subs supers]
   ([[] []])
-  ([[type . subtypes'] [type . supertypes']] (subtyping subtypes' supertypes'))
-  ([_ [type]] (== type clojure.lang.ArraySeq))
-  ([[subtype . subtypes'] [supertype . supertypes']]
-     (project [subtype supertype] (== true (isa? subtype supertype)))
-     (subtyping subtypes' supertypes')))
+  ([[type . subs'] [type . supers']] (subtyping subs' supers'))
+  ([_ [type]] (pred type (partial = clojure.lang.ArraySeq)))
+  ([[sub . subs'] [super . supers']]
+     (project [sub super] (== true (isa? sub super)))
+     (subtyping subs' supers')))
 
 (defna app [operator operands type]
-  ([[::-> supertypes type] _ _]
-     (subtyping operands supertypes)))
+  ([[::-> supertypes type] _ _] (subtyping operands supertypes)))
 
 (defne attempt [operators operands type]
   ([[operator . _] _ _] (app operator operands type))
@@ -80,44 +81,43 @@
   ([[[expr type] . _] expr _])
   ([[_ . ctx'] _ _] (variable ctx' expr type)))
 
-(defn immediate [expr type]
-    (conda [(pred expr symbol?)
+(defn source [sym]
+  (some-> sym source-fn read-string macroexpand-all))
+
+(def immediate
+  (tabled [expr type]
+    (conda [(pred expr integer?) (== type Long/TYPE)]
+           [(pred expr float?) (== type Double/TYPE)]
+           [(pred expr symbol?)
             (fresh [expr']
-              (is expr' expr #(some-> % source-fn read-string macroexpand-all))
-              (conda [(pred expr' (complement nil?))
-                      (ann [] expr' type)]
-                     [(fresh [var]
-                        (is var expr resolve)
-                        (pred var var?)
-                        (is type var (comp class var-get)))]
-                     [(project [expr]
-                        (error (str "Unable to resolve symbol: " expr)))]))]
-           [(conde [(pred expr integer?) (== type 'long)]
-                   [(pred expr float?) (== type 'double)]
-                   [(is type expr class)])]))
+              (is expr' expr source)
+              (pred expr' (complement nil?))
+              (ann [] expr' type))]
+           [(is type expr class)])))
 
 (defn call [ctx dot instance method arguments type]
-  (conda [(== '. dot)
-          (pred method symbol?)
-          (fresh [class arguments']
-            (form ctx arguments arguments')
-            (conde [(pred instance symbol?)
-                    (is class instance resolve)]
-                   [(ann ctx instance class)])
-            (conda [(pred class class?)
-                    (project [class method]
-                      (attempt (reflection class method) arguments' type))]
-                   [(project [instance]
-                      (error (str "Unable to typed symbol: " instance)))]))]))
+  (all (pred dot (partial = '.))
+       (pred method symbol?)
+       (fresh [class arguments']
+         (conda [(pred instance symbol?)
+                 (is class instance resolve)
+                 (pred class class?)]
+                [(ann ctx instance class)])
+         (form ctx arguments arguments')
+         (project [class method]
+           (attempt (reflection class method) arguments' type)))))
 
 (defna ann [ctx expr type]
+  ([_ ['def _] _] u#)
   ([_ ['def name expr'] _]
      (fresh [ctx']
        (conso [name type] ctx ctx')
        (ann ctx' expr' type)))
   ([_ ['fn* name . functions] _]
      (pred name symbol?)
-     (ann-fn ctx functions type))
+     (fresh [ctx']
+       (conso [name type] ctx ctx')
+       (ann-fn ctx functions type)))
   ([_ ['fn* . functions] _] (ann-fn ctx functions type))
   ([_ ['if _ consequence] _]
      (ann-if ctx consequence nil type))
@@ -125,10 +125,10 @@
      (ann-if ctx consequence alternative type))
   ([_ ['let* bindings body] _] (ann-let ctx bindings body type))
   ([_ ['do . exprs] _] (ann-do ctx exprs type))
-  ([_ ['quote] nil])
-  ([_ ['quote expr' . _] _] (immediate expr' type))
+  ([_ ['quote expr'] _] (immediate expr' type))
   ([_ ['new class . _] _] (is type class resolve))
   ([_ ['recur . _] _] u#)
+  ([_ ['throw . _] _] u#)
   ([_ [dot instance [method . arguments]] _]
      (call ctx dot instance method arguments type))
   ([_ [dot instance method . arguments] _]
