@@ -3,8 +3,7 @@
   (:require [clojure.walk :refer (macroexpand-all)]
             [clojure.reflect :refer (reflect)]
             [clojure.repl :refer (source-fn)]
-            [clojure.core.logic :refer :all]
-            [clojure.core.logic.dcg :refer :all]))
+            [clojure.core.logic :refer :all]))
 
 (def ^:dynamic *depth* 10)
 
@@ -26,9 +25,10 @@
              (project [name] (tag (-> name meta :tag) type))]
             [s#])))
 
-(defn ann-if [ctx consequence alternative type]
-  (conde [(ann ctx consequence type)]
-         [(ann ctx alternative type)]))
+(defn ann-if [ctx predicate consequence alternative type]
+  (all (fresh [type'] (ann ctx predicate type'))
+       (conde [(ann ctx consequence type)]
+              [(ann ctx alternative type)])))
 
 (defna ann-let [ctx bindings body type]
   ([_ [] _ _] (ann ctx body type))
@@ -84,16 +84,15 @@
 (defn source [sym]
   (some-> sym source-fn read-string macroexpand-all))
 
-(def immediate
-  (tabled [expr type]
-    (conda [(pred expr integer?) (== type Long/TYPE)]
-           [(pred expr float?) (== type Double/TYPE)]
-           [(pred expr symbol?)
-            (fresh [expr']
-              (is expr' expr source)
-              (pred expr' (complement nil?))
-              (ann [] expr' type))]
-           [(is type expr class)])))
+(defn immediate [expr type]
+  (conda [(pred expr integer?) (== type Long/TYPE)]
+         [(pred expr float?) (== type Double/TYPE)]
+         [(pred expr symbol?)
+          (fresh [expr']
+            (is expr' expr source)
+            (pred expr' (complement nil?))
+            (ann [] expr' type))]
+         [(is type expr class)]))
 
 (defn call [ctx dot instance method arguments type]
   (all (pred dot (partial = '.))
@@ -119,10 +118,10 @@
        (conso [name type] ctx ctx')
        (ann-fn ctx functions type)))
   ([_ ['fn* . functions] _] (ann-fn ctx functions type))
-  ([_ ['if _ consequence] _]
-     (ann-if ctx consequence nil type))
-  ([_ ['if _ consequence alternative] _]
-     (ann-if ctx consequence alternative type))
+  ([_ ['if predicate consequence] _]
+     (ann-if ctx predicate consequence nil type))
+  ([_ ['if predicate consequence alternative] _]
+     (ann-if ctx predicate consequence alternative type))
   ([_ ['let* bindings body] _] (ann-let ctx bindings body type))
   ([_ ['do . exprs] _] (ann-do ctx exprs type))
   ([_ ['quote expr'] _] (immediate expr' type))
