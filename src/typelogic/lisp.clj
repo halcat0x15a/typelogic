@@ -3,27 +3,16 @@
   (:require [clojure.walk :refer (macroexpand-all)]
             [clojure.reflect :refer (reflect)]
             [clojure.repl :refer (source-fn)]
-            [clojure.core.logic :refer :all]))
+            [clojure.core.logic :refer :all]
+            [typelogic.java :as java]))
 
 (def ^:dynamic *depth* 10)
 
+(defne every [x xs]
+  ([_ [x . _]])
+  ([_ [_ . xs']] (every x xs')))
+
 (declare ann)
-
-(defna tag [tag type]
-  (['long _] (== type Long/TYPE))
-  (['double _] (== type Double/TYPE))
-  ([_ _]
-     (pred tag symbol?)
-     (is type tag resolve)))
-
-(defna bind [ctx ctx' names types]
-  ([_ ctx [] []])
-  ([_ [[name type] . ctx''] ['& _] [type]] (== type clojure.lang.ArraySeq))
-  ([_ [[name type] . ctx''] [name . names'] [type . types']]
-     (bind ctx ctx'' names' types')
-     (conda [(pred name #(contains? (meta %) :tag))
-             (project [name] (tag (-> name meta :tag) type))]
-            [s#])))
 
 (defn ann-if [ctx predicate consequence alternative type]
   (all (fresh [type'] (ann ctx predicate type'))
@@ -33,15 +22,54 @@
 (defna ann-let [ctx bindings body type]
   ([_ [] _ _] (ann ctx body type))
   ([_ [var val . bindings'] _ _]
-     (fresh [ctx' type']
-       (ann ctx val type')
-       (bind ctx ctx' [var] [type'])
+     (fresh [ctx' val']
+       (ann ctx val val')
+       (conso [var val'] ctx ctx')
        (ann-let ctx' bindings' body type))))
 
 (defna ann-do [ctx exprs type]
   ([_ [] nil])
   ([_ [expr] _] (ann ctx expr type))
   ([_ [_ . exprs'] _] (ann-do ctx exprs' type)))
+
+(defna ann-var [ctx expr type]
+  ([[[expr type] . _] expr _])
+  ([[_ . ctx'] _ _] (ann-var ctx' expr type)))
+
+(defn ann-self [expr type]
+  (conda [(pred expr integer?)
+          (every type [Long Long/TYPE Integer Integer/TYPE])]
+         [(pred expr float?)
+          (every type [Double Double/TYPE Float Float/TYPE])]
+         [())
+
+(defna ann [ctx expr type]
+  ([_ ['if predicate consequence] _]
+     (ann-if ctx predicate consequence nil type))
+  ([_ ['if predicate consequence alternative] _]
+     (ann-if ctx predicate consequence alternative type))
+  ([_ ['let* bindings body] _]
+     (ann-let ctx bindings body type))
+  ([_ ['do . exprs] _]
+     (ann-do ctx exprs type))
+  ([_ _ _]
+     (pred expr symbol?)
+     (ann-var ctx expr type))
+  ([_ _ _] (is type expr class)))
+
+(comment
+(defn tag [tag type]
+  (all (is type tag java/class)
+       (pred type class?)))
+
+(defna bind [ctx ctx' names types]
+  ([_ ctx [] []])
+  ([_ [[name type] . ctx''] ['& _] [type]] (== type clojure.lang.ArraySeq))
+  ([_ [[name type] . ctx''] [name . names'] [type . types']]
+     (bind ctx ctx'' names' types')
+     (conda [(pred name #(contains? (meta %) :tag))
+             (project [name] (== type (-> name meta :tag java/class)))]
+            [s#])))
 
 (defne ann-fn [ctx functions type]
   ([_ [[parameters body] . _] [::-> types return]]
@@ -71,16 +99,6 @@
   ([[operator . _] _ _] (app operator operands type))
   ([[_ . operators'] _ _] (attempt operators' operands type)))
 
-(defn reflection [class method]
-  (->> class
-       .getMethods
-       (filter #(= (.getName %) (name method)))
-       (map #(list ::-> (vec (.getParameterTypes %)) (.getReturnType %)))))
-
-(defna variable [ctx expr type]
-  ([[[expr type] . _] expr _])
-  ([[_ . ctx'] _ _] (variable ctx' expr type)))
-
 (defn source [sym]
   (some-> sym source-fn read-string macroexpand-all))
 
@@ -104,7 +122,7 @@
                 [(ann ctx instance class)])
          (form ctx arguments arguments')
          (project [class method]
-           (attempt (reflection class method) arguments' type)))))
+           (attempt (java/methods class method) arguments' type)))))
 
 (defna ann [ctx expr type]
   ([_ ['def _] _] u#)
@@ -137,8 +155,8 @@
        (ann ctx operator operator')
        (form ctx operands operands')
        (app operator' operands' type)))
-  ([_ _ _] (variable ctx expr type))
+  ([_ _ _] (ann-var ctx expr type))
   ([_ _ _] (immediate expr type)))
-
+)
 (defn check [expr]
   (set (run *depth* [type] (ann [] (macroexpand-all expr) type))))
