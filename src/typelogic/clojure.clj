@@ -22,6 +22,3 @@
   ([] (-main sources))
   ([exprs]
      (first (run 1 [q] (check-all [] exprs q)))))
-
-  (binding [*ns* core]
-(doseq [var (time (-main (take 50 sources)))] (prn var)))

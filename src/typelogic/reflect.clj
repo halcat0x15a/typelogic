@@ -1,10 +1,26 @@
 (ns typelogic.reflect
-  (:refer-clojure :exclude [methods])
+  (:refer-clojure :exclude [supers methods isa?])
+  (:require [clojure.core :as core])
   (:import [java.lang.reflect Method Field Constructor]))
 
+(derive Long ::number)
+(derive Integer ::number)
+(derive Double ::number)
+(derive Float ::number)
+(derive Long/TYPE ::number)
+(derive Integer/TYPE ::number)
+(derive Double/TYPE ::number)
+(derive Float/TYPE ::number)
+
+(defmulti isa? (fn [a b] [a b]))
+(defmethod isa? [::number ::number] [_ _] true)
+(defmethod isa? :default [a b] (core/isa? a b))
+
 (defn method [^Class class method & parameter-types]
-  (doto (.getDeclaredMethod class (name method) (into-array Class parameter-types))
-    (.setAccessible true)))
+  (try
+    (doto (.getDeclaredMethod class (name method) (into-array Class parameter-types))
+      (.setAccessible true))
+    (catch NoSuchMethodException _)))
 
 (defn invoke [^Method method obj & args]
   (.invoke method obj  (into-array Object args)))
@@ -39,6 +55,13 @@
        .getConstructors
        (map #(function class (.getParameterTypes ^Constructor %)))))
 
+(defn supers [class]
+  (loop [^Class class class
+         supers []]
+    (if (or (nil? class) (= class Object))
+      (conj supers Object)
+      (recur (.getSuperclass class) (into (conj supers class) (.getInterfaces class))))))
+
 (def numbers
   [Long/TYPE Integer/TYPE Double/TYPE Float/TYPE
    Long Integer Double Float])
@@ -47,9 +70,6 @@
   (try
     (let [expr (Compiler/analyze clojure.lang.Compiler$C/STATEMENT x)
           type (class expr)]
-      (cond (number? x) (concat numbers (supers (class x)))
-            (-> type (method 'hasJavaClass) (invoke expr) boolean)
-            (let [class (-> type (method 'getJavaClass) (invoke expr))]
-              (cons class (supers class)))
-            :else [nil]))
-    (catch Exception _ [nil])))
+      (if (some-> type (method 'hasJavaClass) (invoke expr) boolean)
+        (-> type (method 'getJavaClass) (invoke expr))))
+    (catch RuntimeException _)))
