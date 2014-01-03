@@ -1,6 +1,7 @@
 (ns typelogic.core
-  (:refer-clojure :exclude [==])
-  (:require [clojure.walk :refer (walk macroexpand-all)]
+  (:refer-clojure :exclude [== isa?])
+  (:require [clojure.core :as core]
+            [clojure.walk :refer (walk macroexpand-all)]
             [clojure.repl :refer (source-fn)]
             [clojure.core.logic :refer :all]
             [typelogic.reflect :as reflect]
@@ -10,16 +11,41 @@
 
 (declare ann)
 
+(derive Long ::number)
+(derive Integer ::number)
+(derive Double ::number)
+(derive Float ::number)
+(derive Long/TYPE ::number)
+(derive Integer/TYPE ::number)
+(derive Double/TYPE ::number)
+(derive Float/TYPE ::number)
+
+(defn convert [type]
+  (if (coll? type)
+    (case (first type)
+      ::fn clojure.lang.Fn
+      ::vec clojure.lang.PersistentVector
+      ::seq clojure.lang.ArraySeq
+      type)
+    type))
+
+(defmulti isa? (fn [a b] [a b]))
+(defmethod isa? [::number ::number] [_ _] true)
+(defmethod isa? :default [a b] (core/isa? (convert a) (convert b)))
+
 (defn ann-ctx [ctx expr]
   (fresh [type]
     (ann ctx expr type)))
 
 (defn ann-if [ctx test then else type]
-  (all (ann-ctx ctx test)
-       (conde [(all (ann ctx then type)
-                    (ann-ctx ctx else))]
-              [(all (ann-ctx ctx then)
-                    (ann ctx else type))])))
+  (all
+    (ann-ctx ctx test)
+    (conda [(ann ctx then type)
+            (ann ctx else type)]
+           [(conde [(ann ctx then type)
+                    (ann-ctx ctx else)]
+                   [(ann-ctx ctx then)
+                    (ann ctx else type)])])))
 
 (defna ann-do [ctx exprs type]
   ([_ [] nil])
@@ -39,8 +65,9 @@
        (ann-let ctx' bindings' exprs type))))
 
 (defn tag [symbol type]
-  (all (pred symbol (comp boolean :tag meta))
-       (is type symbol (comp reflect/tag->class :tag meta))))
+  (all
+    (pred symbol (comp boolean :tag meta))
+    (is type symbol (comp reflect/tag->class :tag meta))))
 
 (defna ann-params [params types bindings]
   ([[] [] []])
@@ -50,45 +77,42 @@
             [succeed])
      (ann-params params' types' bindings')))
 
-(defne ann-fn [ctx fns type]
-  ([_ [params . exprs] [::fn return . types]]
+(defna ann-fn [ctx exprs type]
+  ([_ [params . exprs'] [::fn return . types]]
      (pred params vector?)
      (fresh [bindings ctx']
        (ann-params params types bindings)
        (appendo bindings ctx ctx')
-       (ann-do ctx' exprs return)))
-  ([_ [expr . _] _]
-     (ann-fn ctx expr type))
-  ([_ [_ . fns'] type]
-     (ann-fn ctx fns' type)))
-
-(defn ann-val [expr type]
-  (is type expr reflect/infer))
+       (ann-do ctx' exprs' return)))
+  ([_ [expr . exprs'] _]
+     (pred exprs seq?)
+     (conde [(ann-fn ctx expr type)]
+            [(ann-fn ctx exprs' type)])))
 
 (defna ann-var [ctx expr type]
   ([[[expr type] . _] _ _])
   ([[_ . ctx'] _ _]
      (ann-var ctx' expr type)))
 
-(defna ann-list [ctx exprs types]
+(defn ann-val [expr type]
+  (is type expr reflect/infer))
+
+(defna app [ctx exprs types]
   ([_ [] []])
   ([_ [expr . exprs'] [type . types']]
      (fresh [type']
        (ann ctx expr type')
-       (conda [(project [type type'] (== true (reflect/isa? type' type)))]
+       (conda [(project [type type'] (== true (isa? type' type)))]
               [(== type type')])
-       (ann-list ctx exprs' types')))
+       (app ctx exprs' types')))
   ([_ _ [type]]
      (pred type (partial = ::seq))))
 
-(defna app [ctx operator operands type]
-  ([_ [::fn type . types] _ _]
-     (ann-list ctx operands types)))
-
 (defn resolve-class [symbol type]
-  (all (pred symbol symbol?)
-       (is type symbol reflect/symbol->class)
-       (pred type (complement nil?))))
+  (all
+    (pred symbol symbol?)
+    (is type symbol reflect/symbol->class)
+    (pred type (complement nil?))))
 
 (defn call [ctx obj msg args type]
   (fresh [obj' msg']
@@ -100,18 +124,20 @@
     (project [obj' msg]
       (conda [(util/every type (reflect/fields obj' msg))]
              [(util/every msg' (reflect/methods obj' msg))
-              (app ctx msg' args type)]))))
+              (matcha [msg'] ([[type . types]] (app ctx args types)))]))))
 
 (defn construct [ctx class args type]
   (fresh [constructor]
     (resolve-class class type)
     (project [type] (util/every constructor (reflect/constructors type)))
-    (app ctx constructor args type)))
+    (matcha [constructor] ([[type . types]] (app ctx args types)))))
 
 (defna ann [ctx expr type]
   ([_ ['def name] [::var name]])
-  ([_ ['def name expr'] [::var name type'']]
-     (ann ctx expr' type''))
+  ([_ ['def name expr'] [::var name type']]
+     (fresh [ctx']
+       (conso [name type'] ctx ctx')
+       (ann ctx' expr' type')))
   ([_ ['if test then] _]
      (ann-if ctx test then nil type))
   ([_ ['if test then else] _]
@@ -131,7 +157,8 @@
      (ann-fn ctx exprs type))
   ([_ ['loop* bindings . exprs] _]
      (ann-let ctx bindings exprs type))
-  ([_ ['recur . _] _] fail)
+  ([_ ['recur . exprs] _]
+     (everyg (partial ann-ctx ctx) exprs))
   ([_ ['throw _] _] fail)
   ([_ [dot obj [method . args]] _]
      (== dot '.)
@@ -142,9 +169,13 @@
   ([_ ['new class . args] _]
      (construct ctx class args type))
   ([_ [operator . operands] _]
+     (pred expr seq?)
      (fresh [operator']
        (ann ctx operator operator')
-       (app ctx operator' operands type)))
+       (matcha [operator'] ([[::fn type . types]] (app ctx operands types)))))
+  ([_ _ [::vec . types]]
+     (pred expr vector?)
+     (app ctx expr types))
   ([_ _ _]
      (pred expr (complement seq?))
      (conda [(ann-var ctx expr type)]

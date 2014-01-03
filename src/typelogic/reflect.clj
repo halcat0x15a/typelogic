@@ -3,19 +3,6 @@
   (:require [clojure.core :as core])
   (:import [java.lang.reflect Method Field Constructor]))
 
-(derive Long ::number)
-(derive Integer ::number)
-(derive Double ::number)
-(derive Float ::number)
-(derive Long/TYPE ::number)
-(derive Integer/TYPE ::number)
-(derive Double/TYPE ::number)
-(derive Float/TYPE ::number)
-
-(defmulti isa? (fn [a b] [a b]))
-(defmethod isa? [::number ::number] [_ _] true)
-(defmethod isa? :default [a b] (core/isa? a b))
-
 (defn method [^Class class method & parameter-types]
   (try
     (doto (.getDeclaredMethod class (name method) (into-array Class parameter-types))
@@ -35,14 +22,11 @@
       (method 'maybeClass Object Boolean/TYPE)
       (invoke nil class true)))
 
-(defn function [return-type parameter-types]
-  (apply vector :typelogic.core/fn return-type parameter-types))
-
 (defn methods [^Class class method]
   (->> class
        .getMethods
        (filter #(= (.getName ^Method %) (name method)))
-       (map #(function (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
+       (map #(apply vector (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
 
 (defn fields [^Class class field]
   (->> class
@@ -53,7 +37,7 @@
 (defn constructors [^Class class]
   (->> class
        .getConstructors
-       (map #(function class (.getParameterTypes ^Constructor %)))))
+       (map #(apply vector class (.getParameterTypes ^Constructor %)))))
 
 (defn supers [class]
   (loop [^Class class class
