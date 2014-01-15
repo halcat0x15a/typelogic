@@ -22,11 +22,14 @@
       (method 'maybeClass Object Boolean/TYPE)
       (invoke nil class true)))
 
+(defn function [return params]
+  (apply vector :typelogic.core/fn return params))
+
 (defn methods [^Class class method]
   (->> class
        .getMethods
        (filter #(= (.getName ^Method %) (name method)))
-       (map #(apply vector (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
+       (map #(function (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
 
 (defn fields [^Class class field]
   (->> class
@@ -37,18 +40,7 @@
 (defn constructors [^Class class]
   (->> class
        .getConstructors
-       (map #(apply vector class (.getParameterTypes ^Constructor %)))))
-
-(defn supers [class]
-  (loop [^Class class class
-         supers []]
-    (if (or (nil? class) (= class Object))
-      (conj supers Object)
-      (recur (.getSuperclass class) (into (conj supers class) (.getInterfaces class))))))
-
-(def numbers
-  [Long/TYPE Integer/TYPE Double/TYPE Float/TYPE
-   Long Integer Double Float])
+       (map #(function class (.getParameterTypes ^Constructor %)))))
 
 (defn infer [x]
   (try
@@ -57,3 +49,4 @@
       (if (some-> type (method 'hasJavaClass) (invoke expr) boolean)
         (-> type (method 'getJavaClass) (invoke expr))))
     (catch RuntimeException _)))
+
