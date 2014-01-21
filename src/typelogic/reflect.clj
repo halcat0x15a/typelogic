@@ -50,3 +50,4 @@
         (-> type (method 'getJavaClass) (invoke expr))))
     (catch RuntimeException _)))
 
+(methods Object 'toString)
