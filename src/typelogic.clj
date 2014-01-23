@@ -14,7 +14,7 @@
       (prn expr)
       (->> expr
            check
-           (mapcat next)
+           (mapcat :env)
            (concat env)
            doall))
     (catch StackOverflowError e
@@ -29,7 +29,8 @@
     (let [line (comp :line meta val)
           filename (str (escape namespace {\- \_ \. \/}) ".clj")
           vars (->> *ns*
-                     ns-publics
+                     ns-map
+                     (filter (comp var? val))
                      (filter (complement (comp :macro meta val)))
                      (sort-by line)
                      (group-by (comp :file meta val))
@@ -37,7 +38,7 @@
                      (mapcat val)
                      (map (comp read-string source-fn key)))]
       (pprint (->> vars
-                   (take 150)
+                   (take 20)
                    (reduce check' [])
                    time)
               (writer *filename*)))))

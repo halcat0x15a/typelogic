@@ -3,24 +3,12 @@
   (:require [clojure.core :as core])
   (:import [java.lang.reflect Method Field Constructor]))
 
-(defn method [^Class class method & parameter-types]
-  (try
-    (doto (.getDeclaredMethod class (name method) (into-array Class parameter-types))
-      (.setAccessible true))
-    (catch NoSuchMethodException _)))
-
-(defn invoke [^Method method obj & args]
-  (.invoke method obj  (into-array Object args)))
+(def primitives
+  {'long Long/TYPE
+   'double Double/TYPE})
 
 (defn tag->class [tag]
-  (-> clojure.lang.Compiler$HostExpr
-      (method 'tagToClass Object)
-      (invoke nil tag)))
-
-(defn symbol->class [class]
-  (-> clojure.lang.Compiler$HostExpr
-      (method 'maybeClass Object Boolean/TYPE)
-      (invoke nil class true)))
+  (get primitives tag (resolve tag)))
 
 (defn function [return params]
   (apply vector :typelogic.core/fn return params))
@@ -42,12 +30,8 @@
        .getConstructors
        (map #(function class (.getParameterTypes ^Constructor %)))))
 
-(defn infer [x]
-  (try
-    (let [expr (Compiler/analyze clojure.lang.Compiler$C/STATEMENT x)
-          type (class expr)]
-      (if (some-> type (method 'hasJavaClass) (invoke expr) boolean)
-        (-> type (method 'getJavaClass) (invoke expr))))
-    (catch RuntimeException _)))
-
-(methods Object 'toString)
+(defn field [sym]
+  (let [[_ class field] (re-matches #"(.*)/(.*)" (str sym))]
+    (prn class field)
+    (if (and class field)
+      (list '. (symbol class) (symbol field)))))
