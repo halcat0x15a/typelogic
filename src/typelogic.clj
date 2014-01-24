@@ -38,7 +38,7 @@
                      (mapcat val)
                      (map (comp read-string source-fn key)))]
       (pprint (->> vars
-                   (take 20)
+                   (take 50)
                    (reduce check' [])
                    time)
               (writer *filename*)))))

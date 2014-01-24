@@ -10,14 +10,11 @@
 (defn tag->class [tag]
   (get primitives tag (resolve tag)))
 
-(defn function [return params]
-  (apply vector :typelogic.core/fn return params))
-
 (defn methods [^Class class method]
   (->> class
        .getMethods
        (filter #(= (.getName ^Method %) (name method)))
-       (map #(function (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
+       (map #(cons (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
 
 (defn fields [^Class class field]
   (->> class
@@ -28,7 +25,7 @@
 (defn constructors [^Class class]
   (->> class
        .getConstructors
-       (map #(function class (.getParameterTypes ^Constructor %)))))
+       (map #(cons class (.getParameterTypes ^Constructor %)))))
 
 (defn field [sym]
   (let [[_ class field] (re-matches #"(.*)/(.*)" (str sym))]
