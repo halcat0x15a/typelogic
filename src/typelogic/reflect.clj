@@ -12,9 +12,10 @@
 
 (defn methods [^Class class method]
   (->> class
-       .getMethods
+       .getDeclaredMethods
        (filter #(= (.getName ^Method %) (name method)))
-       (map #(cons (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
+       (map #(cons (.getReturnType ^Method %) (.getParameterTypes ^Method %)))
+       reverse))
 
 (defn fields [^Class class field]
   (->> class
@@ -29,6 +30,5 @@
 
 (defn field [sym]
   (let [[_ class field] (re-matches #"(.*)/(.*)" (str sym))]
-    (prn class field)
     (if (and class field)
       (list '. (symbol class) (symbol field)))))

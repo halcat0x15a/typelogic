@@ -93,22 +93,6 @@
               (ann ctx val type')
               (ann-let ctx' bindings' exprs type)))))))
 
-(defn ann-loop
-  ([env ctx exprs type]
-     (fresh [ctx']
-       (matcha [ctx' exprs]
-         ([[['recur [::fn [type . types]]] . ctx] [bindings . exprs']]
-            (ann-loop env ctx' bindings exprs' type types)))))
-  ([env ctx bindings exprs type types]
-     (matcha [bindings types]
-       ([[] []] (ann-do env ctx exprs type))
-       ([[var val . bindings'] [type' . types']]
-          (fresh [ctx']
-            (conso [var type'] ctx ctx')
-            (with-ann env
-              (ann ctx val type')
-              (ann-loop ctx' bindings' exprs type types')))))))
-
 (defn tag [symbol type]
   (fresh [tag]
     (is tag symbol (comp :tag meta))
@@ -164,10 +148,8 @@
   ([operators operands type]
      (matcha [operators]
        ([[::fn . operators']] (ann-app operators' operands type))
-       ([[operator . operators']]
-          (matcha [operator]
-            ([[type . types]] (ann-app types operands))
-            ([_] (ann-app operators' operands type))))
+       ([[[type . types] . operators']] (ann-app types operands))
+       ([[_ . operators']] (ann-app operators' operands type))
        ([_] (== operators clojure.lang.IFn))))
   ([params args]
      (matcha [params args]
@@ -177,6 +159,21 @@
                  [(project [type type'] (== (isa? type' type) true))])
           (ann-app types types'))
        ([[type] _] (pred type (partial = ::seq))))))
+
+(defn ann-loop
+  ([env ctx exprs type]
+     (matcha [exprs]
+       ([[bindings . exprs']]
+          (fresh [expr params args]
+            (ann-loop bindings params args)
+            (matcha [expr] ([[['fn* [params' . exprs']] . args]] (is params' params vec)))
+            (project [expr] (log expr))
+            (ann-app env ctx expr type)))))
+  ([bindings params args]
+     (matcha [bindings params args]
+       ([[] [] []])
+       ([[param arg . bindings'] [param . params'] [arg . args']]
+          (ann-loop bindings' params' args')))))
 
 (defna ann-var [ctx expr type]
   ([[[expr type] . ctx'] _ _])
@@ -238,7 +235,7 @@
     (pred type class?)
     (is constructor type reflect/constructors)
     (ann-list env ctx args types)
-    (ann-app constructor types)))
+    (ann-app constructor types type)))
 
 (defn ann [env ctx expr type]
   (fresh [operator operands]
@@ -286,8 +283,7 @@
             (== env [])])))
 
 (defn check [expr]
-  (distinct
-   (run *n* [result]
-     (fresh [type env]
-       (== result {:type type :env env})
-       (ann env [] (macroexpand-all expr) type)))))
+  (run *n* [result]
+    (fresh [type env]
+      (== result {:type type :env env})
+      (ann env [] (macroexpand-all expr) type))))
