@@ -109,27 +109,28 @@
 (defn ann-fns [env ctx exprs types]
   (matcha [env exprs types]
     ([[] [] []])
-    ([_ [expr . exprs'] [type . types']]
-       (conda [(pred expr vector?)
-               (fresh [bindings ctx']
-                 (ann-params expr types' bindings)
-                 (append* bindings ctx ctx')
-                 (ann-do env ctx' exprs' type))]
-              [(pred expr seq?)
-               (with-ann env
-                 (ann-fns ctx expr type)
-                 (ann-fns ctx exprs' types'))]))))
+    ([_ [expr . exprs'] [[type . types']]]
+       (pred expr vector?)
+       (fresh [bindings ctx']
+         (ann-params expr types' bindings)
+         (append* bindings ctx ctx')
+         (ann-do env ctx' exprs' type)))
+    ([_ [expr . exprs'] _]
+       (pred expr seq?)
+       (fresh [type types']
+         (with-ann env
+           (ann-fns ctx expr type)
+           (ann-fns ctx exprs' types'))
+         (append* type types' types)))))
 
 (defn ann-fn [env ctx exprs type]
-  (fresh [types]
-    (conso ::fn types type)
-    (fresh [ctx']
-      (matcha [exprs ctx']
-        ([[name . exprs'] [[name type] ['recur type] . ctx]]
-           (pred name symbol?)
-           (ann-fns env ctx' exprs' types))
-        ([_ [['recur type] . ctx]]
-           (ann-fns env ctx' exprs types))))))
+  (fresh [ctx']
+    (matcha [ctx' exprs type]
+      ([[[name type] ['recur type] . ctx] [name . exprs'] [::fn . types]]
+         (pred name symbol?)
+         (ann-fns env ctx' exprs' types))
+      ([[['recur type] . ctx] _ [::fn . types]]
+         (ann-fns env ctx' exprs types)))))
 
 (defn ann-list [env ctx exprs types]
   (matcha [env exprs types]
@@ -146,19 +147,26 @@
        (matcha [types]
          ([[operators . oprands]] (ann-app operators oprands type)))))
   ([operators operands type]
+     (all (project [operators operands type] (log operators operands type))
      (matcha [operators]
-       ([[::fn . operators']] (ann-app operators' operands type))
-       ([[[type . types] . operators']] (ann-app types operands))
-       ([[_ . operators']] (ann-app operators' operands type))
-       ([_] (== operators clojure.lang.IFn))))
+       ([[::fn [type . types] . _]]
+          (project [type types operands] (log type types operands))
+          (ann-app types operands)
+          (log "success"))
+       ([[::fn _ . types]]
+          (fresh [operators']
+            (conso ::fn types operators')
+            (ann-app operators' operands type)))
+       ([_] (equals operators clojure.lang.IFn)))))
   ([params args]
      (matcha [params args]
        ([[] []])
+       ([[type . types] [type . types']] (ann-app types types'))
        ([[type . types] [type' . types']]
-          (conda [(== type type')]
-                 [(project [type type'] (== (isa? type' type) true))])
+          (project [type type'] (log type type'))
+          (project [type type'] (== (isa? type' type) true))
           (ann-app types types'))
-       ([[type] _] (pred type (partial = ::seq))))))
+       ([[type] _] (equals type ::seq)))))
 
 (defn ann-loop
   ([env ctx exprs type]
@@ -167,7 +175,6 @@
           (fresh [expr params args]
             (ann-loop bindings params args)
             (matcha [expr] ([[['fn* [params' . exprs']] . args]] (is params' params vec)))
-            (project [expr] (log expr))
             (ann-app env ctx expr type)))))
   ([bindings params args]
      (matcha [bindings params args]
@@ -225,7 +232,7 @@
          (ann-list ctx args types))
        (project [class name]
          (conda [(every type (reflect/fields class name))]
-                [(ann-app (reflect/methods class name) types type)])))))
+                [(ann-app (cons ::fn (reflect/methods class name)) types type)])))))
   
 (defn ann-new [env ctx exprs type]
   (fresh [class args constructor types]

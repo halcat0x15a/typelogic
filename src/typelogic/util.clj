@@ -6,6 +6,9 @@
 (defn maybe [x]
   (conda [x] [succeed]))
 
+(defn equals [x y]
+  (pred x (partial = y)))
+
 (defne every [x xs]
   ([_ [x . _]])
   ([_ [_ . xs']]
