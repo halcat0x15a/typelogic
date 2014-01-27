@@ -1,5 +1,5 @@
 (ns typelogic.core
-  (:refer-clojure :exclude [== isa?])
+  (:refer-clojure :exclude [==])
   (:require [clojure.core :as core]
             [clojure.walk :refer (macroexpand-all)]
             [clojure.repl :refer (source-fn)]
@@ -13,30 +13,29 @@
 (declare ann)
 (declare check)
 
-(derive Long ::number)
-(derive Integer ::number)
-(derive Double ::number)
-(derive Float ::number)
-(derive Long/TYPE ::number)
-(derive Integer/TYPE ::number)
-(derive Double/TYPE ::number)
-(derive Float/TYPE ::number)
+(def primitives
+  {Boolean/TYPE Boolean
+   Character/TYPE Character
+   Byte/TYPE Byte
+   Short/TYPE Short
+   Integer/TYPE Integer
+   Long/TYPE Long
+   Float/TYPE Float
+   Double/TYPE Double})
 
-(def types
+(def literals
   {::fn clojure.lang.AFunction
    ::vec clojure.lang.PersistentVector
    ::seq clojure.lang.ArraySeq
    ::var clojure.lang.Var})
 
 (defn convert [type]
-  (cond (keyword? type) (get types type)
-        (sequential? type) (get types (first type))
-        :else type))
+  (get (merge primitives literals)
+       (if (sequential? type) (first type) type)
+       type))
 
-(defn isa? [a b]
-  (or (nil? a)
-      (and (core/isa? a ::number) (core/isa? b ::number))
-      (core/isa? (convert a) (convert b))))
+(defn isa [v c]
+  (predc v #(or (nil? %) (isa? (convert %) (convert c))) (fn [_ v _ _] `(isa ~v ~c))))
 
 (defn resolve-fn [symbol]
   (if-let [types (->> *env* (filter #(= (first %) symbol)) (map second) seq)]
@@ -46,7 +45,7 @@
 (defmacro with-ann [env & anns]
   (let [envs (repeatedly (count anns) gensym)]
     `(fresh [~@envs]
-       (perm ~@(map (fn [[f & xs] e] `(~f ~e ~@xs)) anns envs))
+       ~@(map (fn [[f & xs] e] `(~f ~e ~@xs)) anns envs)
        (append ~env ~@envs))))
 
 (defn ann-ctx [env ctx expr]
@@ -107,21 +106,17 @@
      (ann-params params' types' bindings')))
 
 (defn ann-fns [env ctx exprs types]
-  (matcha [env exprs types]
-    ([[] [] []])
-    ([_ [expr . exprs'] [[type . types']]]
+  (matcha [exprs types]
+    ([[expr . exprs'] [return . params]]
        (pred expr vector?)
        (fresh [bindings ctx']
-         (ann-params expr types' bindings)
+         (ann-params expr params bindings)
          (append* bindings ctx ctx')
-         (ann-do env ctx' exprs' type)))
-    ([_ [expr . exprs'] _]
+         (ann-do env ctx' exprs' return)))
+    ([[expr . exprs'] _]
        (pred expr seq?)
-       (fresh [type types']
-         (with-ann env
-           (ann-fns ctx expr type)
-           (ann-fns ctx exprs' types'))
-         (append* type types' types)))))
+       (conde [(ann-fns env ctx expr types)]
+              [(ann-fns env ctx exprs' types)]))))
 
 (defn ann-fn [env ctx exprs type]
   (fresh [ctx']
@@ -147,24 +142,15 @@
        (matcha [types]
          ([[operators . oprands]] (ann-app operators oprands type)))))
   ([operators operands type]
-     (all (project [operators operands type] (log operators operands type))
      (matcha [operators]
-       ([[::fn [type . types] . _]]
-          (project [type types operands] (log type types operands))
-          (ann-app types operands)
-          (log "success"))
-       ([[::fn _ . types]]
-          (fresh [operators']
-            (conso ::fn types operators')
-            (ann-app operators' operands type)))
-       ([_] (equals operators clojure.lang.IFn)))))
+       ([[::fn type . params]] (ann-app params operands))
+       ([_] (equals operators clojure.lang.IFn))))
   ([params args]
      (matcha [params args]
        ([[] []])
        ([[type . types] [type . types']] (ann-app types types'))
        ([[type . types] [type' . types']]
-          (project [type type'] (log type type'))
-          (project [type type'] (== (isa? type' type) true))
+          (isa type' type)
           (ann-app types types'))
        ([[type] _] (equals type ::seq)))))
 
@@ -232,7 +218,9 @@
          (ann-list ctx args types))
        (project [class name]
          (conda [(every type (reflect/fields class name))]
-                [(ann-app (cons ::fn (reflect/methods class name)) types type)])))))
+                [(fresh [method]
+                   (every method (map (partial cons ::fn) (reflect/methods class name)))
+                   (ann-app method types type))])))))
   
 (defn ann-new [env ctx exprs type]
   (fresh [class args constructor types]
