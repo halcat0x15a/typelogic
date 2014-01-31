@@ -13,6 +13,19 @@
 (declare ann)
 (declare check)
 
+(derive Byte/TYPE ::number)
+(derive Byte ::number)
+(derive Short/TYPE ::number)
+(derive Short ::number)
+(derive Integer/TYPE ::number)
+(derive Integer ::number)
+(derive Long/TYPE ::number)
+(derive Long ::number)
+(derive Float/TYPE ::number)
+(derive Float ::number)
+(derive Double/TYPE ::number)
+(derive Double ::number)
+
 (def primitives
   {Boolean/TYPE Boolean
    Character/TYPE Character
@@ -35,7 +48,8 @@
        type))
 
 (defn isa [v c]
-  (predc v #(or (nil? %) (isa? (convert %) (convert c))) (fn [_ v _ _] `(isa ~v ~c))))
+  (project [c]
+    (predc v #(or (nil? %) (and (isa? % ::number) (isa? c ::number)) (isa? (convert %) (convert c))) (fn [_ v _ _] `(isa ~v ~c)))))
 
 (defn resolve-fn [symbol]
   (if-let [types (->> *env* (filter #(= (first %) symbol)) (map second) seq)]
@@ -49,8 +63,7 @@
        (append ~env ~@envs))))
 
 (defn ann-ctx [env ctx expr]
-  (fresh [type]
-    (ann env ctx expr type)))
+  (fresh [type] (ann env ctx expr type)))
 
 (defn ann-if
   ([env ctx exprs type]
@@ -105,27 +118,28 @@
      (maybe (tag param type))
      (ann-params params' types' bindings')))
 
-(defn ann-fns [env ctx exprs types]
-  (matcha [exprs types]
-    ([[expr . exprs'] [return . params]]
-       (pred expr vector?)
-       (fresh [bindings ctx']
-         (ann-params expr params bindings)
-         (append* bindings ctx ctx')
-         (ann-do env ctx' exprs' return)))
-    ([[expr . exprs'] _]
-       (pred expr seq?)
-       (conde [(ann-fns env ctx expr types)]
-              [(ann-fns env ctx exprs' types)]))))
-
-(defn ann-fn [env ctx exprs type]
-  (fresh [ctx']
-    (matcha [ctx' exprs type]
-      ([[[name type] ['recur type] . ctx] [name . exprs'] [::fn . types]]
-         (pred name symbol?)
-         (ann-fns env ctx' exprs' types))
-      ([[['recur type] . ctx] _ [::fn . types]]
-         (ann-fns env ctx' exprs types)))))
+(defn ann-fn
+  ([env ctx exprs type]
+     (fresh [ctx' return params]
+       (matcha [type] ([[::fn return . params]]))
+       (matcha [ctx' exprs]
+         ([[[name [::delay exprs]] ['recur type] . ctx] [name . exprs']]
+            (pred name symbol?)
+            (ann-fn env ctx' exprs' return params))
+         ([[['recur type] . ctx] _]
+            (ann-fn env ctx' exprs return params)))))
+  ([env ctx exprs return params]
+     (matcha [exprs]
+       ([[expr . exprs']]
+          (pred expr vector?)
+          (fresh [bindings ctx']
+            (ann-params expr params bindings)
+            (append* bindings ctx ctx')
+            (ann-do env ctx' exprs' return)))
+       ([[expr . exprs']]
+          (pred expr seq?)
+          (conde [(ann-fn env ctx expr return params)]
+                 [(ann-fn env ctx exprs' return params)])))))
 
 (defn ann-list [env ctx exprs types]
   (matcha [env exprs types]
@@ -168,9 +182,11 @@
        ([[param arg . bindings'] [param . params'] [arg . args']]
           (ann-loop bindings' params' args')))))
 
-(defna ann-var [ctx expr type]
-  ([[[expr type] . ctx'] _ _])
-  ([[_ . ctx'] _ _] (ann-var ctx' expr type)))
+(defna ann-var [env ctx expr type]
+  ([_ [[expr [::delay expr']] . _] _ _]
+     (condu [(ann-fn env ctx expr' type)]))
+  ([[] [[expr type] . _] _ _])
+  ([_ [_ . ctx'] _ _] (ann-var env ctx' expr type)))
 
 (defn ann-val [expr type]
   (fresh [var type']
@@ -228,7 +244,8 @@
     (pred class symbol?)
     (is type class resolve)
     (pred type class?)
-    (is constructor type reflect/constructors)
+    (project [type]
+      (every constructor (map (partial cons ::fn) (reflect/constructors type))))
     (ann-list env ctx args types)
     (ann-app constructor types type)))
 
@@ -272,8 +289,7 @@
                     (matcha [type]
                       ([[::vec . types]] (ann-list env ctx expr types)))])]
            [(all (pred expr symbol?)
-                 (ann-var ctx expr type)
-                 (== env []))]
+                 (ann-var env ctx expr type))]
            [(ann-val expr type)
             (== env [])])))
 
