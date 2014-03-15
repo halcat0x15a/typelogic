@@ -7,40 +7,27 @@
   (:import clojure.lang.ExceptionInfo))
 
 (def ^:dynamic *filename* ".typelogic.clj")
-(def ^:dynamic *timeout* 60000)
+(def ^:dynamic *timeout* 1000)
 
-(defn check [env symbol]
-  (-> (try
-        (binding [*env* env]
-          (prn symbol)
-          (->> symbol
-               source-fn
-               read-string
-               core/check
-               (mapcat :env)
-               (concat env)
-               doall))
-        (catch StackOverflowError e
-          (prn e symbol)
-          env)
-        (catch ExceptionInfo e
-          (prn e symbol)
-          env))
-      future
-      (deref *timeout* env)))
+(defn check [symbol]
+  (deref
+    (future
+      (try
+        (let [result (core/check symbol)]
+          (doto [symbol (doall result)] prn))
+        (catch Throwable e)))
+      *timeout*
+      nil))
 
 (defn -main [namespace]
+  (require (symbol namespace))
   (binding [*ns* (find-ns (symbol namespace))]
-    (pprint (->> *ns*
-                 ns-map
+    (pprint (->> (ns-map *ns*)
                  (filter (comp var? val))
                  (filter (complement (comp :macro meta val)))
-                 (sort-by (comp :line meta val))
-                 (group-by (comp :file meta val))
-                 (filter #(= (str (escape namespace {\- \_ \. \/}) ".clj") (key %)))
-                 (mapcat val)
                  (map key)
-                 (reduce check [])
+                 (pmap check)
+                 (reduce concat [])
                  time)
             (writer *filename*))
     (shutdown-agents)))
