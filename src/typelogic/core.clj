@@ -1,19 +1,19 @@
 (ns typelogic.core
-  (:refer-clojure :exclude [isa? == methods])
+  (:refer-clojure :exclude [isa? ==])
   (:require [clojure.core :as core]
             [clojure.walk :refer [macroexpand-all]]
             [clojure.repl :refer [source-fn]]
             [clojure.core.logic :refer :all]
+            [clojure.core.logic.pldb :as pldb]
             [clojure.core.logic.protocols :refer [lfirst]]
             [typelogic.reflect :as reflect]
-            [typelogic.util :refer :all])
-  (:import [java.lang.reflect Modifier Method Field Constructor]))
+            [typelogic.util :refer :all]))
 
 (def ^:dynamic *n* 15)
-(def ^:dynamic *env* [])
+
+(def env (ref {}))
 
 (declare ann)
-(declare check)
 
 (def primitives
   {Boolean/TYPE Boolean
@@ -26,10 +26,10 @@
    Double/TYPE Double})
 
 (def literals
-  {::fn clojure.lang.AFunction
-   ::vec clojure.lang.PersistentVector
-   ::seq clojure.lang.ArraySeq
-   ::var clojure.lang.Var})
+  {:fn clojure.lang.AFunction
+   :vec clojure.lang.PersistentVector
+   :seq clojure.lang.ArraySeq
+   :var clojure.lang.Var})
 
 (defn convert [type]
   (cond (class? type) (get primitives type type)
@@ -45,21 +45,13 @@
         (and (core/isa? b Number) (core/isa? a Number))
         (core/isa? a b))))
 
-(defn final? [^Class class]
-  (or (Modifier/isFinal (.getModifiers class))
-      (.isPrimitive class)))
-
-(defn isa [c v]
-  (conda [(pred c lvar?)
+(defn subtype [c v]
+  (conda [(pred c reflect/final?)
           (== v c)]
-         [(all
-            (pred c class?)
-            (pred c final?)
-            (pred v lvar?)
-            (== v c))]
          [(pred c class?)
-          (project [c] (predc v #(isa % c) (fn [_ _ r s] `(isa ~(-reify s v r) ~c))))
-          (project [c] (fn [a] (add-attr a v ::tag (convert c))))]))
+          (project [c]
+            (predc v #(isa? % c) (fn [_ _ r s] (list 'subtype (-reify s v r) c))))]
+         [(== v c)]))
 
 (defn resolve-fn [symbol]
   (some->> symbol source-fn read-string macroexpand-all))
@@ -84,8 +76,8 @@
     ([[]] (ann-do ctx exprs type))
     ([[var val . bindings']]
        (fresh [ctx' type']
-         (conso [var type'] ctx ctx')
          (ann ctx val type')
+         (conso [var type'] ctx ctx')
          (ann-let ctx' bindings' exprs type)))))
 
 (defn tag [symbol type]
@@ -95,45 +87,42 @@
     (is type tag resolve)
     (pred type class?)))
 
-(defna bind [params types bindings]
+(defna make-bindings [syms params bindings]
   ([[] [] []])
-  ([['& param] [::seq] [[param ::seq]]])
-  ([[param . params'] [type . types'] [[param type] . bindings']]
-     (conda [(fresh [class]
-               (tag param class)
-               (isa class type))]
+  ([['& sym] [:seq] [[sym :seq]]])
+  ([[sym . syms'] [param . params'] [[sym param] . bindings']]
+     (conda [(tag sym param)]
             [succeed])
-     (bind params' types' bindings')))
+     (make-bindings syms' params' bindings')))
 
-(defn thunk [ctx name expr ctx']
-  (project [expr]
-    (conso [name [::thunk ctx expr]] ctx ctx')))
+(defn ann-fn [ctx syms exprs type]
+  (fresh [bindings ctx']
+    (pred syms vector?)
+    (matcha [bindings type]
+      ([[['recur type] . bindings'] [:fn return . params]]
+         (make-bindings syms params bindings')
+         (appendo bindings ctx ctx')
+         (ann-do ctx' exprs return)))))
 
-(defn ann-fn
-  ([ctx name params exprs type]
-     (fresh [ctx']
-       (thunk ctx name (llist 'fn* params exprs) ctx')
-       (ann-fn ctx' params exprs type)))
-  ([ctx params exprs type]
-     (matcha [type]
-       ([[::fn return . params']]
-          (fresh [bindings ctx' ctx'']
-            (bind params params' bindings)
-            (appendo bindings ctx ctx')
-            (conso ['recur type] ctx' ctx'')
-            (ann-do ctx'' exprs return))))))
+(defn ann-fns [ctx exprs type]
+  (matche [exprs]
+    ([[[syms . body] . _]]
+       (ann-fn ctx syms body type))
+    ([[_ . exprs']]
+       (ann-fns ctx exprs' type))))
 
-(defn ann-fns
-  ([ctx name exprs type]
-     (fresh [ctx']
-       (thunk ctx name (lcons 'fn* exprs) ctx')
-       (ann-fns ctx' exprs type)))
-  ([ctx exprs type]
-     (matche [exprs]
-       ([[[params . body] . _]]
-          (ann-fn ctx params body type))
-       ([[_ . exprs']]
-          (ann-fns ctx exprs' type)))))
+(defn ann-named-fn [ctx name syms exprs type]
+  (fresh [ctx']
+    (pred name symbol?)
+    (conso [name type] ctx ctx')
+    (ann-fn ctx' syms exprs type)))
+
+(defn ann-named-fns [ctx name exprs type]
+  (fresh [ctx' type']
+    (pred name symbol?)
+    (conso [name type'] ctx ctx')
+    (ann-fns ctx' exprs type)
+    (condu [(ann-fns ctx exprs type')])))
 
 (defn ann-list [ctx exprs types]
   (matcha [exprs types]
@@ -145,42 +134,49 @@
 (defna app [params args]
   ([[] []])
   ([[param] _]
-     (pred param (partial = ::seq)))
+     (pred param #(= % :seq)))
   ([[param . params'] [arg . args']]
-     (isa param arg)
+     (subtype param arg)
      (app params' args')))
 
 (defn ann-app [ctx exprs type]
   (fresh [types]
     (ann-list ctx exprs types)
     (matcha [types]
-      ([[[::fn type . params] . args]] (app params args))
-      ([[operator . _]] (pred operator #(isa? % clojure.lang.IFn))))))
-
-(defn loop->fn [expr]
-  (let [[_ bindings & exprs] expr
-        bindings (partition 2 bindings)]
-    `((fn* (~(vec (map first bindings)) ~@exprs)) ~@(map second bindings))))
+      ([[[:fn type . params] . args]]
+         (app params args))
+      ([[[:var name [:fn type . params]] . args]]
+         (app params args))
+      ([[operator . _]]
+         (pred operator #(isa? % clojure.lang.IFn))))))
 
 (defn ann-loop [ctx expr type]
-  (project [expr] (ann ctx (loop->fn expr) type)))
+  (letfn [(loop->fn [expr]
+            (let [[_ bindings & exprs] expr
+                  bindings (partition 2 bindings)]
+              `((fn* (~(vec (map first bindings)) ~@exprs))
+                ~@(map second bindings))))]
+    (project [expr] (ann ctx (loop->fn expr) type))))
 
 (defn resolve-class [symbol type]
-  (fresh [var]
-    (is var symbol resolve)
-    (pred var class?)
-    (is type var class)))
+  (all
+    (is type symbol resolve)
+    (pred type class?)))
+
+(defn env-get [sym type]
+  (all
+   (pred sym (partial contains? @env))
+   (is type sym (partial get @env))))
+
+(defn ann-global [expr type]
+  (conda [(fresh [type]
+            (resolve-class expr type))
+            (== type java.lang.Class)]
+         [(project [expr]
+            (ann [] (resolve-fn expr) type))]))
 
 (defn ann-var [ctx expr type]
   (matcha [ctx]
-    ([[]]
-       (fresh [type']
-         (conda [(resolve-class expr type)]
-                [(project [expr] (ann [] (resolve-fn expr) type'))
-                 (matcha [type'] ([[::def expr type]]))])))
-    ([[[expr [thunk ctx' expr']] . _]]
-       (pred thunk (partial = ::thunk))
-       (ann ctx' expr' type))
     ([[[expr type] . _]])
     ([[_ . ctx']]
        (ann-var ctx' expr type))))
@@ -189,74 +185,75 @@
   (fresh [var type']
     (conda [(pred expr symbol?)
             (all
-             (is var expr reflect/field)
+             (is var expr reflect/static-field)
              (pred var (complement nil?))
              (ann [] [] var type))]
            [(is type expr class)])))
 
-(defn constructors [^Class class]
-  (map (comp seq (memfn ^Constructor getParameterTypes)) (.getConstructors class)))
+(defn overload [fn fns]
+  (matche [fns]
+    ([[fn . _]])
+    ([[_ . fns']]
+       (every fn fns'))))
 
-(defn ann-new [ctx class args type]
-  (fresh [param-types arg-types]
+(defn ann-new [ctx class exprs type]
+  (fresh [params args]
     (pred class symbol?)
     (is type class resolve)
     (pred type class?)
-    (project [type] (every param-types (constructors type)))
-    (ann-list ctx args arg-types)
-    (app param-types arg-types)))
+    (project [type] (overload params (reflect/constructors type)))
+    (ann-list ctx exprs args)
+    (app params args)))
 
-(defn fields [^Class class field]
-  (->> class
-       .getFields
-       (filter #(= (.getName ^Field %) (name field)))
-       (map (memfn ^Field getType))))
+(defn ann-receiver [ctx expr class]
+  (conda [(tag expr class)]
+         [(resolve-class expr class)]
+         [(fresh [type]
+            (ann ctx expr type)
+            (is class type convert)
+            (pred class class?))]))
 
-(defn methods [^Class class method]
-  (->> class
-       .getMethods
-       (filter #(= (.getName ^Method %) (name method)))
-       (map #(cons (.getReturnType ^Method %) (.getParameterTypes ^Method %)))))
+(defn ann-field [ctx expr field type]
+  (fresh [class]
+    (pred field symbol?)
+    (ann-receiver ctx expr class)
+    (project [field]
+      (is type class #(reflect/field % field)))
+    (pred type class?)))
 
-(defn ann-dot [ctx obj name args type]
-  (fresh [class method arg-types]
-    (conda [(tag obj class)]
-           [(all (pred obj symbol?) (is class obj resolve) (pred class class?))]
-           [(fresh [type]
-              (ann ctx obj type)
-              (conda [(fn [a]
-                        (if-let [tag (get-attr a type ::tag)]
-                          ((== class tag) a)))]
-                     [(is class type convert)])
-              (pred class class?))])
-    (pred class class?)
+(defn ann-method [ctx expr name exprs type]
+  (fresh [class method args]
     (pred name symbol?)
+    (ann-receiver ctx expr class)
     (project [class name]
-      (conda [(every type (fields class name))]
-             [(every method (methods class name))]))
+      (overload method (reflect/methods class name)))
+    (ann-list ctx exprs args)
     (matcha [method]
       ([[return . params]]
-         (ann-list ctx args arg-types)
-         (app params arg-types)
-         (isa return type)))))
+         (app params args)
+         (subtype return type)))))
 
 (defn ann-try [ctx exprs type]
   (fresh [ctx']
     (matcha [ctx'] ([[['catch catch] ['finally finally] . ctx]]))
     (ann-do ctx' exprs type)))
 
-(defn ann-def [ctx name expr type]
-  (matcha [type]
-    ([[::def name type']]
-      (fresh [ctx']
-        (thunk ctx name expr ctx')
-        (ann ctx' expr type')))))
+(defn ann-def [ctx name expr var]
+  (fresh [ctx' type']
+    (matcha [var]
+      ([[:var name type]]
+         (conso [name type'] ctx ctx')
+         (ann ctx' expr type)
+         (condu [(ann ctx expr type')])))))
 
 (defn ann [ctx expr type]
   (matcha [expr]
-    ([['def name]]
-       (== type [::def name]))
+    ([['def name]] (== type [:var name]))
     ([['def name expr']]
+       (project [name]
+         (dosync
+          (alter env assoc name type)
+          succeed))
        (ann-def ctx name expr' type))
     ([['if test then]]
        (ann-if ctx test then nil type))
@@ -268,16 +265,12 @@
        (ann-let ctx bindings exprs type))
     ([['quote expr']]
        (is type expr' class))
-    ([['fn* name params . exprs]]
-       (pred name symbol?)
-       (pred params vector?)
-       (ann-fn ctx name params exprs type))
+    ([['fn* name syms . exprs]]
+       (ann-named-fn ctx name syms exprs type))
     ([['fn* name . exprs]]
-       (pred name symbol?)
-       (ann-fns ctx name exprs type))
-    ([['fn* params . exprs]]
-       (pred params vector?)
-       (ann-fn ctx params exprs type))
+       (ann-named-fns ctx name exprs type))
+    ([['fn* syms . exprs]]
+       (ann-fn ctx syms exprs type))
     ([['fn* . exprs]]
        (ann-fns ctx exprs type))
     ([['loop* . _]]
@@ -286,20 +279,25 @@
        (ann-try ctx exprs type))
     ([['throw expr']]
        (fresh [type] (ann ctx expr' type)))
-    ([[dot object [method . args]]]
+    ([[dot expr' field]]
        (== dot '.)
-       (ann-dot ctx object method args type))
-    ([[dot object method . args]]
+       (ann-field ctx expr' field type))
+    ([[dot expr' [method . args]]]
        (== dot '.)
-       (ann-dot ctx object method args type))
-    ([['new object . arguments]]
-       (ann-new ctx object arguments type))
+       (ann-method ctx expr' method args type))
+    ([[dot expr' method . args]]
+       (== dot '.)
+       (ann-method ctx expr' method args type))
+    ([['new class . args]]
+       (ann-new ctx class args type))
     ([_]
        (pred expr seq?)
        (ann-app ctx expr type))
     ([_]
        (pred expr symbol?)
-       (ann-var ctx expr type))
+       (conda [(ann-var ctx expr type)]
+              [(env-get expr type)]
+              [(ann-global expr type)]))
     ([_]
        (ann-val expr type))))
 

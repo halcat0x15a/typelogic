@@ -1,7 +1,25 @@
 (ns typelogic.reflect
   (:refer-clojure :exclude [supers methods isa?])
   (:require [clojure.core :as core])
-  (:import [java.lang.reflect Method Field Constructor]))
+  (:import [java.lang.reflect Modifier Method Field Constructor]))
+
+(defn final? [^Class class]
+  (and (class? class)
+       (or (Modifier/isFinal (.getModifiers class))
+           (.isPrimitive class))))
+
+(defn constructors [^Class class]
+  (map #(seq (.getParameterTypes ^Constructor %)) (.getConstructors class)))
+
+(defn methods [^Class class method]
+  (->> (.getMethods class)
+       (filter #(= (.getName ^Method %) (name method)))
+       (map #(fn [^Method m] (cons (.getReturnType m) (.getParameterTypes m))))))
+
+(defn field [^Class class field]
+  (try
+    (.getField class (name field))
+    (catch NoSuchFieldException _)))
 
 (def primitives
   {'long Long/TYPE
@@ -23,12 +41,8 @@
        (filter #(= (.getName ^Field %) (name field)))
        (map (memfn ^Field getType))))
 
-(defn constructors [^Class class]
-  (->> class
-       .getConstructors
-       (map #(cons class (.getParameterTypes ^Constructor %)))))
-
-(defn field [sym]
+(defn static-field [sym]
   (let [[_ class field] (re-matches #"(.*)/(.*)" (str sym))]
     (if (and class field)
       (list '. (symbol class) (symbol field)))))
+(constructors String)

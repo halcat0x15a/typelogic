@@ -3,7 +3,7 @@
             [clojure.repl :refer (source-fn)] 
             [clojure.pprint :refer (pprint)]
             [clojure.java.io :refer (resource writer)]
-            [typelogic.core :refer (*env*) :as core])
+            [typelogic.core :as core])
   (:import clojure.lang.ExceptionInfo))
 
 (def ^:dynamic *filename* ".typelogic.clj")
