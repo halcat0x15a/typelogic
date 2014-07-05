@@ -1,5 +1,5 @@
 (ns typelogic.core
-  (:refer-clojure :exclude [isa? ==])
+  (:refer-clojure :exclude [==])
   (:require [clojure.core :as core]
             [clojure.walk :refer [macroexpand-all]]
             [clojure.repl :refer [source-fn]]
@@ -11,47 +11,45 @@
 
 (def ^:dynamic *n* 15)
 
-(def env (ref {}))
+(def ^:dynamic *env* pldb/empty-db)
+
+(pldb/db-rel global sym type)
 
 (declare ann)
 
-(def primitives
-  {Boolean/TYPE Boolean
-   Character/TYPE Character
-   Byte/TYPE Byte
-   Short/TYPE Short
-   Integer/TYPE Integer
-   Long/TYPE Long
-   Float/TYPE Float
-   Double/TYPE Double})
+(defmulti convert
+  (fn [type]
+    (cond (class? type) ::class
+          (sequential? type) (first type)
+          (lcons? type) (lfirst type)
+          (nil? type) ::nil)))
 
-(def literals
-  {:fn clojure.lang.AFunction
-   :vec clojure.lang.PersistentVector
-   :seq clojure.lang.ArraySeq
-   :var clojure.lang.Var})
+(defmethod convert :fn [_] clojure.lang.AFunction)
+(defmethod convert :seq [_] clojure.lang.ArraySeq)
+(defmethod convert :var [_] clojure.lang.Var)
+(defmethod convert Boolean/TYPE [_] Boolean)
+(defmethod convert Character/TYPE [_] Character)
+(defmethod convert Byte/TYPE [_] Byte)
+(defmethod convert Short/TYPE [_] Short)
+(defmethod convert Integer/TYPE [_] Integer)
+(defmethod convert Long/TYPE [_] Long)
+(defmethod convert Float/TYPE [_] Float)
+(defmethod convert Double/TYPE [_] Double)
+(defmethod convert ::class [type] type)
+(defmethod convert ::nil [_] nil)
 
-(defn convert [type]
-  (cond (class? type) (get primitives type type)
-        (keyword? type) (get literals type)
-        (sequential? type) (get literals (first type))
-        (lcons? type) (get literals (lfirst type))
-        (lvar? type) Object))
-
-(defn isa? [a b]
-  (let [a (convert a)
-        b (convert b)]
-    (or (and (core/isa? b Object) (nil? a))
-        (and (core/isa? b Number) (core/isa? a Number))
-        (core/isa? a b))))
+(defn subtype? [a b]
+  (or (and (isa? b Object) (nil? a))
+      (and (isa? (convert a) Number) (isa? (convert b) Number))
+      (isa? (convert a) (convert b))))
 
 (defn subtype [c v]
   (conda [(pred c reflect/final?)
           (== v c)]
+         [(== v c)]
          [(pred c class?)
           (project [c]
-            (predc v #(isa? % c) (fn [_ _ r s] (list 'subtype (-reify s v r) c))))]
-         [(== v c)]))
+            (predc v #(subtype? % c) (fn [_ _ r s] (list 'subtype (-reify s v r) c))))]))
 
 (defn resolve-fn [symbol]
   (some->> symbol source-fn read-string macroexpand-all))
@@ -61,7 +59,8 @@
     (fresh [type] (ann ctx test type))
     (ann ctx then then')
     (ann ctx else else')
-    (matche [type] ([then']) ([else']))))
+    (conda [(all (== type then') (== type else'))]
+           [(matche [type] ([then']) ([else']))])))
 
 (defn ann-do [ctx exprs type]
   (matcha [exprs]
@@ -89,7 +88,7 @@
 
 (defna make-bindings [syms params bindings]
   ([[] [] []])
-  ([['& sym] [:seq] [[sym :seq]]])
+  ([['& sym] [[:seq]] [[sym [:seq]]]])
   ([[sym . syms'] [param . params'] [[sym param] . bindings']]
      (conda [(tag sym param)]
             [succeed])
@@ -99,7 +98,7 @@
   (fresh [bindings ctx']
     (pred syms vector?)
     (matcha [bindings type]
-      ([[['recur type] . bindings'] [:fn return . params]]
+      ([[['recur type] . bindings'] [:fn params return]]
          (make-bindings syms params bindings')
          (appendo bindings ctx ctx')
          (ann-do ctx' exprs return)))))
@@ -133,22 +132,19 @@
 
 (defna app [params args]
   ([[] []])
-  ([[param] _]
-     (pred param #(= % :seq)))
   ([[param . params'] [arg . args']]
      (subtype param arg)
-     (app params' args')))
+     (app params' args'))
+  ([[[param]] _] (pred param #(= % :seq))))
 
 (defn ann-app [ctx exprs type]
   (fresh [types]
     (ann-list ctx exprs types)
     (matcha [types]
-      ([[[:fn type . params] . args]]
+      ([[[:fn params type] . args]]
          (app params args))
-      ([[[:var name [:fn type . params]] . args]]
-         (app params args))
-      ([[operator . _]]
-         (pred operator #(isa? % clojure.lang.IFn))))))
+      ([[[:var name [:fn params type]] . args]]
+         (app params args)))))
 
 (defn ann-loop [ctx expr type]
   (letfn [(loop->fn [expr]
@@ -162,11 +158,6 @@
   (all
     (is type symbol resolve)
     (pred type class?)))
-
-(defn env-get [sym type]
-  (all
-   (pred sym (partial contains? @env))
-   (is type sym (partial get @env))))
 
 (defn ann-global [expr type]
   (conda [(fresh [type]
@@ -250,10 +241,6 @@
   (matcha [expr]
     ([['def name]] (== type [:var name]))
     ([['def name expr']]
-       (project [name]
-         (dosync
-          (alter env assoc name type)
-          succeed))
        (ann-def ctx name expr' type))
     ([['if test then]]
        (ann-if ctx test then nil type))
@@ -296,7 +283,7 @@
     ([_]
        (pred expr symbol?)
        (conda [(ann-var ctx expr type)]
-              [(env-get expr type)]
+              [(global expr type)]
               [(ann-global expr type)]))
     ([_]
        (ann-val expr type))))

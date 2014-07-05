@@ -14,7 +14,7 @@
     (future
       (try
         (let [result (core/check symbol)]
-          (doto [symbol (doall result)] prn))
+          (doto (doall result) prn))
         (catch Throwable e)))
       *timeout*
       nil))
