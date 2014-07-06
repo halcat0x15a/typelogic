@@ -1,7 +1,6 @@
 (ns typelogic.util
   (:refer-clojure :exclude [==])
-  (:require [clojure.core.logic :refer :all]
-            [clojure.math.combinatorics :refer (permutations)]))
+  (:require [clojure.core.logic :refer :all]))
 
 (defn maybe [x]
   (conda [x] [succeed]))
