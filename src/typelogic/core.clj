@@ -6,9 +6,10 @@
             [clojure.core.logic :refer :all]
             [clojure.core.logic.pldb :as pldb]
             [clojure.core.logic.protocols :refer [lfirst]]
+            [clojure.core.logic.dcg :refer :all]
             [typelogic.reflect :as reflect]))
 
-(def ^:dynamic *n* 15)
+(def ^:dynamic *n* 3)
 
 (def ^:dynamic *env* pldb/empty-db)
 
@@ -46,12 +47,12 @@
       (isa? (convert a) (convert b))))
 
 (defn subtype [a b]
-  (conda [(all (pred b reflect/final?) (== a b))]
+  (conda [(pred b reflect/final?)
+          (== a b)]
          [(== a b)]
-         [(all
-           (pred b class?)
-           (project [b]
-                    (predc a #(subtype? % b) (fn [_ _ r s] (list 'subtype (-reify s a r) b)))))]))
+         [(pred b class?)
+          (project [b]
+            (predc a #(subtype? % b) (fn [_ _ r s] (list 'subtype (-reify s a r) b))))]))
 
 (defn resolve-fn [symbol]
   (some->> symbol source-fn read-string macroexpand-all))
@@ -61,8 +62,9 @@
     (fresh [type] (ann ctx test type))
     (ann ctx then then')
     (ann ctx else else')
-    (condu [(all (== type then') (== type else'))]
-           [(conde [(== type then')] [(== type else')])])))
+    (conda [(== then' else')
+            (== type then')]
+           [(conde [(== type then')] [(== type then')])])))
 
 (defn ann-do [ctx exprs type]
   (matcha [exprs]
@@ -92,7 +94,7 @@
   ([[] [] []])
   ([['& sym] [[:seq]] [[sym [:seq]]]])
   ([[sym . syms'] [param . params'] [[sym param] . bindings']]
-     (conda [(tag sym param)]
+     (conde [(tag sym param)]
             [succeed])
      (make-bindings syms' params' bindings')))
 
@@ -176,11 +178,11 @@
   
 (defn ann-val [expr type]
   (fresh [var type']
-    (conda [(pred expr symbol?)
+    (conde [(pred expr symbol?)
             (all
              (is var expr reflect/static-field)
              (pred var (complement nil?))
-             (ann [] [] var type))]
+             (ann [] var type))]
            [(is type expr class)])))
 
 (defn overload [fn fns]
@@ -199,7 +201,7 @@
     (app params args)))
 
 (defn ann-receiver [ctx expr class]
-  (conda [(tag expr class)]
+  (conde [(tag expr class)]
          [(resolve-class expr class)]
          [(fresh [type]
             (ann ctx expr type)
@@ -294,6 +296,8 @@
                 [(global expr type)]
                 [(ann-global expr type)]))
       ([_]
+         (pred expr (complement seq?))
+         (pred expr (complement symbol?))
          (ann-val expr type)))
     (subtype type' type)))
 
@@ -302,3 +306,6 @@
    (pldb/with-db *env*
      (run *n* [type]
        (ann [] (macroexpand-all expr) type)))))
+
+(binding [*env* *env*]
+  (check '(if 0 0 0.0)))

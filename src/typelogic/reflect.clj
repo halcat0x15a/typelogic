@@ -21,10 +21,6 @@
     (.getField class (name field))
     (catch NoSuchFieldException _)))
 
-(def primitives
-  {'long Long/TYPE
-   'double Double/TYPE})
-
 (defn tag->class [tag]
   (get primitives tag (resolve tag)))
 
@@ -42,7 +38,18 @@
        (map (memfn ^Field getType))))
 
 (defn static-field [sym]
-  (let [[_ class field] (re-matches #"(.*)/(.*)" (str sym))]
+  (let [[_ class field] (re-matches #"(.+?)/(.+)" (str sym))]
     (if (and class field)
-      (list '. (symbol class) (symbol field)))))
-(constructors String)
+      [(symbol class) (symbol field)])))
+
+(def primitives
+  {'long Long/TYPE
+   'double Double/TYPE})
+
+(defn tag [sym]
+  (if-let [tag (some-> sym meta :tag)]
+    (if-let [class (primitives tag)]
+      class
+      (if-let [var (resolve tag)]
+        (if (class? var)
+          var)))))
