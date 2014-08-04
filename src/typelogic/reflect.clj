@@ -8,11 +8,21 @@
        (or (Modifier/isFinal (.getModifiers class))
            (.isPrimitive class))))
 
+(def box
+  {Boolean/TYPE Boolean
+   Character/TYPE Character
+   Byte/TYPE Byte
+   Short/TYPE Short
+   Integer/TYPE Integer
+   Long/TYPE Long
+   Float/TYPE Float
+   Double/TYPE Double})
+
 (defn constructors [^Class class]
-  (map #(seq (.getParameterTypes ^Constructor %)) (.getConstructors class)))
+  (map #(seq (.getParameterTypes ^Constructor %)) (.getConstructors (get box class class))))
 
 (defn methods [^Class class method]
-  (->> (.getMethods class)
+  (->> (.getMethods (get box class class))
        (filter #(= (.getName ^Method %) (name method)))
        (map #(fn [^Method m] (cons (.getReturnType m) (.getParameterTypes m))))))
 
@@ -20,9 +30,6 @@
   (try
     (.getField class (name field))
     (catch NoSuchFieldException _)))
-
-(defn tag->class [tag]
-  (get primitives tag (resolve tag)))
 
 (defn methods [^Class class method]
   (->> class
@@ -53,3 +60,4 @@
       (if-let [var (resolve tag)]
         (if (class? var)
           var)))))
+(methods String 'toString)

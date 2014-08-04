@@ -3,7 +3,8 @@
             [clojure.repl :refer (source-fn)] 
             [clojure.pprint :refer (pprint)]
             [clojure.java.io :refer (resource writer)]
-            [typelogic.core :as core])
+            [typelogic.core :as core]
+            [typelogic.new :as new])
   (:import clojure.lang.ExceptionInfo))
 
 (def ^:dynamic *filename* ".typelogic.clj")
@@ -12,7 +13,7 @@
 (defn check [symbol]
   (deref (future 
   (try
-    (let [result (core/check symbol)]
+    (let [result (new/check symbol)]
       (binding [core/*env* core/*env*]
         (doto result prn)))
     (catch Throwable e))) *timeout* nil))
