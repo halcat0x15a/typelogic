@@ -24,19 +24,12 @@
 (defn methods [^Class class method]
   (->> (.getMethods (get box class class))
        (filter #(= (.getName ^Method %) (name method)))
-       (map #(fn [^Method m] (cons (.getReturnType m) (.getParameterTypes m))))))
+       (map (fn [^Method m] [(vec (.getParameterTypes m)) (.getReturnType m)]))))
 
 (defn field [^Class class field]
   (try
     (.getField class (name field))
     (catch NoSuchFieldException _)))
-
-(defn methods [^Class class method]
-  (->> class
-       .getDeclaredMethods
-       (filter #(= (.getName ^Method %) (name method)))
-       (map #(cons (.getReturnType ^Method %) (.getParameterTypes ^Method %)))
-       reverse))
 
 (defn fields [^Class class field]
   (->> class

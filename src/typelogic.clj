@@ -9,29 +9,6 @@
 
 (def ^:dynamic *filename* ".typelogic.clj")
 (def ^:dynamic *timeout* 1000)
-(comment
-(defn check [symbol]
-  (deref (future 
-  (try
-    (let [result (new/check symbol)]
-      (binding [core/*env* core/*env*]
-        (doto result prn)))
-    (catch Throwable e))) *timeout* nil))
-
-(defn -main [namespace]
-  (require (symbol namespace))
-  (binding [*ns* (find-ns (symbol namespace))
-            core/*env* core/*env*]
-    (pprint (->> (ns-map *ns*)
-                 (filter (comp var? val))
-                 (sort-by #(:line (meta (val %))))
-                 (filter #(let [m (meta (val %))] (and (not (:macro m)) (= (:file m) "clojure/core.clj"))))
-                 (map (comp check key))
-                 doall
-                 time)
-            (writer *filename*))
-    (shutdown-agents)))
-)
 
 (defn check [symbol]
   (deref
@@ -40,7 +17,8 @@
         (binding [core/*env* core/*env*]
           (let [result (core/check symbol)]
             (doto [symbol (doall result)] prn)))
-        (catch Throwable e)))
+        (catch Throwable e
+          (prn symbol e))))
       *timeout*
       nil))
 
