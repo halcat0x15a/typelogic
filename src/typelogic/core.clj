@@ -35,12 +35,15 @@
       (core/isa? a b)))
 
 (defn <:< [sub super]
-  (conde
-   [(== sub super)]
-   [(project [sub]
-      (letfn [(pred [type] (isa? (convert sub) (convert type)))
-              (form [_ _ r s] (list sub '<:< (-reify s super r)))]
-        (predc super pred form)))]))
+  (fn [cont]
+    (conda
+     [(== sub super)
+      cont]
+     [(project [sub]
+        (letfn [(pred [type] (isa? (convert sub) (convert type)))
+                (form [_ _ r s] (list sub '<:< (-reify s super r)))]
+          (predc super pred form)))
+      cont])))
 
 (defn <:<' [sub super]
   (matche [super]
@@ -52,9 +55,11 @@
     ([_] (<:< sub super))))
 
 (defn ann' [ns env ctx type expr]
-  (fresh [sub]
-    (ann ns env ctx sub expr)
-    (<:< sub type)))
+  (fn [cont]
+    (fresh [sub]
+      ((ann ns env ctx sub expr)
+       ((<:< sub type)
+        cont)))))
 
 (defn local [ctx type sym]
   (matcha [ctx]
@@ -63,12 +68,13 @@
        (local ctx' type sym))))
 
 (defn global [ns env type symbol]
-  (binding [*ns* ns]
-    (if-let [var (resolve symbol)]
-      (if (class? var)
-        (== type Class)
-        (some->> symbol source-fn read-string (ann' (:ns (meta var)) env [] type)))
-      (throw (RuntimeException. (str "Unable to resolve symbol: " symbol " in this context"))))))
+  (fn [cont]
+    (binding [*ns* ns]
+      (if-let [var (resolve symbol)]
+        (if (class? var)
+          (== type Class)
+          ((some->> symbol source-fn read-string (ann' (:ns (meta var)) env [] type)) cont))
+        (throw (RuntimeException. (str "Unable to resolve symbol: " symbol " in this context")))))))
 
 (defmulti special
   (fn [ns env ctx type & exprs]
@@ -82,26 +88,33 @@
   ([ns env ctx type tag test then]
      (special ns env ctx type tag test then nil))
   ([ns env ctx type tag test then else]
-     (all
-       (fresh [type] (ann ns env ctx type test))
-       (ann' ns env ctx type then)
-       (ann' ns env ctx type else)))
+     (fn [cont]
+       (all
+         (fresh [type']
+           ((ann ns env ctx type test)
+            ((ann' ns env ctx type then)
+             ((ann' ns env ctx type else)
+              cont)))))))
   ([ns env ctx type tag test then else & args]
      (throw (RuntimeException. "Too many arguments to if"))))
 
 (defmethod special 'do [ns env ctx type tag & [expr & exprs' :as exprs]]
-  (cond (empty? exprs) (== type nil)
-        (empty? exprs') (ann ns env ctx type expr)
-        :else (all
-                (fresh [type] (ann ns env ctx type expr))
-                (apply special ns env ctx type tag exprs'))))
+  (fn [cont]
+    (cond (empty? exprs) (all (== type nil) cont)
+          (empty? exprs') ((ann ns env ctx type expr) cont)
+          :else (fresh [type']
+                  ((ann ns env ctx type expr)
+                   ((apply special ns env ctx type tag exprs')
+                    cont))))))
 
 (defmethod special 'let* [ns env ctx type tag [var expr & bindings' :as bindings] & exprs]
-  (if (empty? bindings)
-    (apply special ns env ctx type 'do exprs)
-    (fresh [val]
-      (ann ns env ctx val expr)
-      (apply special ns env (lcons [var val] ctx) type tag bindings' exprs))))
+  (fn [cont]
+    (if (empty? bindings)
+      ((apply special ns env ctx type 'do exprs) cont)
+      (fresh [val]
+        ((ann ns env ctx val expr)
+         ((apply special ns env (lcons [var val] ctx) type tag bindings' exprs)
+          cont))))))
 
 (def primitives
   {'long Long/TYPE
@@ -125,42 +138,51 @@
             [succeed])
      (bind syms' params' bindings')))
 
-(defn ann-fn [ns env ctx type syms exprs]
-  (fresh [params return bindings ctx']
-    (== type [:fn params return])
-    (bind syms params bindings)
-    (appendo (lcons ['recur type] bindings) ctx ctx')
-    (apply special ns env ctx' return 'do exprs)))
+(defn ann-fn [ns env ctx type syms & exprs]
+  (fn [cont]
+    (fresh [params return bindings ctx']
+      (== type [:fn params return])
+      (bind syms params bindings)
+      (appendo (lcons ['recur type] bindings) ctx ctx')
+      ((apply special ns env ctx' return 'do exprs) cont))))
 
 (defn ann-overloaded [ns env ctx fns [[syms & body] & exprs' :as exprs]]
-  (if (empty? exprs)
-    (== fns [])
-    (fresh [fn fns' ctx']
-      (conso fn fns' fns)
-      (ann-fn ns env ctx fn syms body)
-      (ann-overloaded ns env ctx fns' exprs'))))
+  (fn [cont]
+    (if (empty? exprs)
+      (all (== fns []) cont)
+      (fresh [fn fns' ctx']
+        (conso fn fns' fns)
+        ((ann-fn ns env ctx fn syms body)
+         ((ann-overloaded ns env ctx fns' exprs')
+          cont))))))
 
 (defmethod special 'fn*
-  ([ns env ctx type tag] fail)
+  ([ns env ctx type tag]
+     (fn [cont] fail))
   ([ns env ctx type tag expr & exprs]
-     (cond (seq? expr) (fresh [fns]
-                         (conso :overloaded fns type)
-                         (ann-overloaded ns env ctx fns (cons expr exprs)))
-           (vector? expr) (ann-fn ns env ctx type expr exprs)
-           (symbol? expr) (fresh [type']
-                            (apply special ns env (lcons [expr type'] ctx) type tag exprs)))))
+     (prn ns env ctx type tag expr exprs)
+     (fn [cont]
+       (cond (seq? expr) (conde [((apply ann-fn ns env ctx type expr) cont)]
+                                [((apply special ns env ctx type tag exprs) cont)])
+             (vector? expr) ((apply ann-fn ns env ctx type expr exprs) cont)
+             (symbol? expr) (fresh [type']
+                              ((apply special ns env (lcons [expr type'] ctx) type tag exprs) cont))))))
 
 (defmethod special 'def
   ([ns env ctx type tag name]
-     (== type [:var name]))
+     (fn [cont]
+       (all
+         (== type [:var name])
+         cont)))
   ([ns env ctx type tag name expr]
-     (fresh [type' self]
-       (== type [:var name type'])
-       (ann ns env (lcons [name self] ctx) type' expr)
-       (<:<' self type'))))
+     (fn [cont]
+       (fresh [type' self]
+         (== type [:var name type'])
+         ((ann ns env (lcons [name self] ctx) type' expr) cont)))))
 
 (defmethod special 'quote [ns env ctx type tag & exprs]
-  (== type (class (first exprs))))
+  (fn [cont]
+    (all (== type (class (first exprs)) cont))))
 
 (defne ->fn [type fn]
   ([[:fn . _] type])
@@ -174,19 +196,23 @@
           (->fn (lcons :overloaded fns') fn)))))
 
 (defn ann-params [ns env ctx params [arg & args' :as args]]
-  (if (empty? args)
-    (== params [])
-    (fresh [param params']
-      (conso param params' params)
-      (conde [(pred param #(= % [:seq]))]
-             [(ann' ns env ctx param arg)
-              (ann-params ns env ctx params' args')]))))
+  (fn [cont]
+    (if (empty? args)
+      (== params [])
+      (fresh [param params']
+        (conso param params' params)
+        (conde [(all (pred param #(= % [:seq])) cont)]
+               [(ann' ns env ctx param arg)
+                ((ann-params ns env ctx params' args') cont)])))))
 
 (defn app [ns env ctx type f args]
-  (fresh [params]
-    (conde [(->fn f [:fn params type])
-            (ann-params ns env ctx params args)]
-           [(pred f #(isa? % clojure.lang.IFn))])))
+  (fn [cont]
+    (fresh [params]
+      (conde [(all
+                (->fn f [:fn params type])
+                ((ann-params ns env ctx params args) cont))]
+             [(pred f #(isa? % clojure.lang.IFn))
+              cont]))))
 
 (defn constructors [^Class class]
   (->> (.getConstructors class)
@@ -194,10 +220,11 @@
        (cons :overloaded)))
 
 (defmethod special 'new [ns env ctx type tag name & args]
-  (let [class (resolve name)]
-    (if (class? class)
-      (app ns env ctx type (constructors class) args)
-      (throw (IllegalArgumentException. (str "Unable to resolve classname: " name))))))
+  (fn [cont]
+    (let [class (resolve name)]
+      (if (class? class)
+        ((app ns env ctx type (constructors class) args) cont)
+        (throw (IllegalArgumentException. (str "Unable to resolve classname: " name)))))))
 
 (defn field [^Class class field]
   (try
@@ -216,44 +243,54 @@
        (cons :overloaded)))
 
 (defn ann-method [ns env ctx type class name & args]
-  (project [class]
-    (app ns env ctx type (methods class name) args)))
+  (fn [cont]
+    (project [class]
+      ((app ns env ctx type (methods class name) args) cont))))
 
 (defmethod special '. [ns env ctx type tag obj msg & args]
-  (fresh [class]
-    (or (if (symbol? obj)
-          (let [var (resolve obj)]
-            (if (class? var)
-              (== class var))))
-        (fresh [type]
-          (ann ns env ctx type obj)
-          (is class type convert))
-        fail)
-    (cond (seq? msg) (apply ann-method ns env ctx type class msg)
-          (symbol? msg) (conda [(ann-field type class msg)]
-                               [(apply ann-method ns env ctx type class msg args)]))))
+  (fn [cont]
+    (fresh [class]
+      (or (if (symbol? obj)
+            (let [var (resolve obj)]
+              (if (class? var)
+                (== class var))))
+          (fresh [type]
+            (ann ns env ctx type obj)
+            (is class type convert))
+          fail)
+      (cond (seq? msg) (apply ann-method ns env ctx type class msg)
+            (symbol? msg) (conda [(ann-field type class msg)]
+                                 [(apply ann-method ns env ctx type class msg args)])))))
 
 (defmethod special 'throw [ns env ctx type tag e]
-  (ann' ns env ctx Throwable e))
+  (fn [cont]
+    ((ann' ns env ctx Throwable e) cont)))
 
 (defmethod special :default [ns env ctx type f & args]
-  (fresh [fn]
-    (ann ns env ctx fn f)
-    (app ns env ctx type fn args)))
+  (fn [cont]
+    (fresh [fn]
+      ((ann ns env ctx fn f)
+       ((app ns env ctx type fn args)
+        cont)))))
 
 (defmethod special nil [ns env ctx type]
-  (== type clojure.lang.PersistentList$EmptyList))
+  (fn [cont]
+    (all (== type clojure.lang.PersistentList$EmptyList) cont)))
 
 (defn ann [ns env ctx type expr]
-  (let [expr (macroexpand expr)]
-    (cond (symbol? expr) (conda [(local ctx type expr)]
-                                [(global ns env type expr)])
-          (seq? expr) (apply special ns env ctx type expr)
-          :else (== type (class expr)))))
+  (fn [cont]
+    (let [expr (macroexpand expr)]
+      (cond (symbol? expr) (conda [(all (local ctx type expr) cont)]
+                                  [((global ns env type expr) cont)])
+            (seq? expr) ((apply special ns env ctx type expr) cont)
+            :else (all (== type (class expr)) cont)))))
 
 (defn check [expr]
   (doall
    (run* [q]
      (fresh [env type]
        (== q [env type])
-       (condu [(ann *ns* env [] type expr)])))))
+       ((ann *ns* env [] type expr) succeed)))))
+
+
+(check '((fn ([a] a) ([a b] b)) 0))
