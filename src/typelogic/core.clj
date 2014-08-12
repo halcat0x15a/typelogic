@@ -1,7 +1,7 @@
 (ns typelogic.core
   (:refer-clojure :exclude [== isa? methods])
   (:require [clojure.core :as core]
-            [clojure.walk :refer [macroexpand-all]]
+            [clojure.walk :refer [macroexpand-all] :as walk]
             [clojure.repl :refer [source-fn]]
             [clojure.core.logic :refer :all]
             [clojure.core.logic.pldb :as pldb])
@@ -9,15 +9,26 @@
 
 (declare ann)
 
+(defn append [xs x]
+  (matchu [xs]
+    ([[x . xs']])
+    ([[_ . xs']]
+       (append xs' x))))
+
+(defna freeze [xs]
+  ([[]])
+  ([[_ . xs']]
+     (freeze xs')))
+
 (defmulti convert
   (fn [type]
     (cond (sequential? type) (first type)
-          (class? type) type)))
+          (class? type) type
+          (lvar? type) :lvar)))
 
 (defmethod convert :fn [_] clojure.lang.AFunction)
 (defmethod convert :seq [_] clojure.lang.ArraySeq)
 (defmethod convert :var [_] clojure.lang.Var)
-(defmethod convert :overloaded [_] clojure.lang.AFunction)
 (defmethod convert Boolean/TYPE [_] Boolean)
 (defmethod convert Character/TYPE [_] Character)
 (defmethod convert Byte/TYPE [_] Byte)
@@ -26,7 +37,7 @@
 (defmethod convert Long/TYPE [_] Long)
 (defmethod convert Float/TYPE [_] Float)
 (defmethod convert Double/TYPE [_] Double)
-(defmethod convert nil [_] Object)
+(defmethod convert :lvar [type] Object)
 (defmethod convert :default [type] type)
 
 (defn isa? [a b]
@@ -42,14 +53,15 @@
               (form [_ _ r s] (list sub '<:< (-reify s super r)))]
         (predc super pred form)))]))
 
-(defn <:<' [sub super]
+(defn has [sub super]
   (matche [super]
-    ([[:overloaded fn . fns]]
-       (conda [(<:< sub fn)]
-              [(<:<' sub (lcons :overloaded fns))]))
-    ([[:var _ type]]
-       (<:< sub type))
-    ([_] (<:< sub super))))
+    ([[:fn type . types]]
+      (fresh [type']
+        (== sub [:fn type'])
+        (condu [(<:< type' type)]
+               [(has sub (lcons :fn types))])))
+    ([_]
+      (<:< sub super))))
 
 (defn ann' [ns env ctx type expr]
   (fresh [sub]
@@ -57,17 +69,20 @@
     (<:< sub type)))
 
 (defn local [ctx type sym]
-  (matcha [ctx]
-    ([[[sym type] . _]])
+  (matchu [ctx]
+    ([[[:var sym type] . _]])
     ([[_ . ctx']]
-       (local ctx' type sym))))
+      (nonlvaro ctx')
+      (local ctx' type sym))))
 
 (defn global [ns env type symbol]
   (binding [*ns* ns]
     (if-let [var (resolve symbol)]
       (if (class? var)
         (== type Class)
-        (some->> symbol source-fn read-string (ann' (:ns (meta var)) env [] type)))
+        (if-let [expr (source-fn symbol)]
+          (ann (:ns (meta var)) env [] type (read-string expr))
+          (throw (RuntimeException. "Source not found"))))
       (throw (RuntimeException. (str "Unable to resolve symbol: " symbol " in this context"))))))
 
 (defmulti special
@@ -101,7 +116,11 @@
     (apply special ns env ctx type 'do exprs)
     (fresh [val]
       (ann ns env ctx val expr)
-      (apply special ns env (lcons [var val] ctx) type tag bindings' exprs))))
+      (apply special ns env (lcons [:var var val] ctx) type tag bindings' exprs))))
+
+(defmethod special 'loop* [ns env ctx type tag bindings & exprs]
+  (let [bindings (partition 2 bindings)]
+    (ann ns env ctx type `((fn* (~(vec (map first bindings)) ~@exprs)) ~@(map second bindings)))))
 
 (def primitives
   {'long Long/TYPE
@@ -117,81 +136,73 @@
 
 (defna bind [syms params bindings]
   ([[] [] []])
-  ([['& sym] [[:seq]] [[sym [:seq]]]])
-  ([[sym . syms'] [param . params'] [[sym param] . bindings']]
-     (conda [(all
+  ([['& sym] [[:seq]] [[:var sym [:seq]]]])
+  ([[sym . syms'] [param . params'] [[:var sym param] . bindings']]
+     (condu [(all
                (is param sym tag)
                (pred param (complement nil?)))]
             [succeed])
      (bind syms' params' bindings')))
 
-(defn ann-fn [ns env ctx type syms exprs]
-  (fresh [params return bindings ctx']
-    (== type [:fn params return])
-    (bind syms params bindings)
-    (appendo (lcons ['recur type] bindings) ctx ctx')
-    (apply special ns env ctx' return 'do exprs)))
-
-(defn ann-overloaded [ns env ctx fns [[syms & body] & exprs' :as exprs]]
+(defn ann-fn [ns env ctx types [[syms & body] & exprs' :as exprs]]
   (if (empty? exprs)
-    (== fns [])
-    (fresh [fn fns' ctx']
-      (conso fn fns' fns)
-      (ann-fn ns env ctx fn syms body)
-      (ann-overloaded ns env ctx fns' exprs'))))
+    (== types [])
+    (fresh [params return types' ctx' bindings]
+      (conso [params return] types' types)
+      (bind syms params bindings)
+      (appendo (lcons [:var 'recur [:fn [params return]]] bindings) ctx ctx')
+      (apply special ns env ctx' return 'do body)
+      (ann-fn ns env ctx types' exprs'))))
 
 (defmethod special 'fn*
   ([ns env ctx type tag] fail)
   ([ns env ctx type tag expr & exprs]
-     (cond (seq? expr) (fresh [fns]
-                         (conso :overloaded fns type)
-                         (ann-overloaded ns env ctx fns (cons expr exprs)))
-           (vector? expr) (ann-fn ns env ctx type expr exprs)
+     (cond (seq? expr) (fresh [types]
+                         (conso :fn types type)
+                         (ann-fn ns env ctx types (cons expr exprs)))
+           (vector? expr) (special ns env ctx type tag (cons expr exprs))
            (symbol? expr) (fresh [type']
-                            (apply special ns env (lcons [expr type'] ctx) type tag exprs)))))
+                            (apply special ns env (lcons [:var expr type'] ctx) type tag exprs)
+                            #_(project [type' type] (log type' type))
+                            (has type' type)))))
 
 (defmethod special 'def
   ([ns env ctx type tag name]
-     (== type [:var name]))
+     (matchu [type] ([[:var name _]])))
   ([ns env ctx type tag name expr]
-     (fresh [type' self]
-       (== type [:var name type'])
-       (ann ns env (lcons [name self] ctx) type' expr)
-       (<:<' self type'))))
+     (let [macro? (:macro (meta name))]
+       (if macro?
+         fail
+         (fresh [type' self]
+           (== type [:var name type'])
+           (ann ns env (lcons [:var name self] ctx) type' expr)
+           (has self type')
+           (append env type))))))
 
 (defmethod special 'quote [ns env ctx type tag & exprs]
   (== type (class (first exprs))))
 
-(defne ->fn [type fn]
-  ([[:fn . _] type])
-  ([[:var _ type'] _]
-     (pred type' (complement lvar?))
-     (->fn type' fn))
-  ([[:overloaded . fns] _]
-     (matche [fns]
-       ([[fn . _]])
-       ([[_ . fns']]
-          (->fn (lcons :overloaded fns') fn)))))
-
-(defn ann-params [ns env ctx params [arg & args' :as args]]
+(defn ann-list [ns env ctx params [arg & args' :as args]]
   (if (empty? args)
     (== params [])
     (fresh [param params']
       (conso param params' params)
       (conde [(pred param #(= % [:seq]))]
              [(ann' ns env ctx param arg)
-              (ann-params ns env ctx params' args')]))))
+              (ann-list ns env ctx params' args')]))))
 
 (defn app [ns env ctx type f args]
-  (fresh [params]
-    (conde [(->fn f [:fn params type])
-            (ann-params ns env ctx params args)]
-           [(pred f #(isa? % clojure.lang.IFn))])))
+  (matche [f]
+    ([[:fn [params type] . _]]
+      (ann-list ns env ctx params args))
+    ([[:fn _ . types]]
+      (nonlvaro types)
+      (app ns env ctx type (lcons :fn types) args))))
 
 (defn constructors [^Class class]
   (->> (.getConstructors class)
-       (map #(vector :fn (seq (.getParameterTypes ^Constructor %)) class))
-       (cons :overloaded)))
+       (map #(vector (vec (.getParameterTypes ^Constructor %)) class))
+       (cons :fn)))
 
 (defmethod special 'new [ns env ctx type tag name & args]
   (let [class (resolve name)]
@@ -201,44 +212,48 @@
 
 (defn field [^Class class field]
   (try
-    (.getField class (name field))
+    (.. class (getField (name field)) (getType))
     (catch NoSuchFieldException _)))
-
-(defn ann-field [type class field]
-  (all
-    (is type class #(field % field))
-    (pred type class?)))
 
 (defn methods [^Class class method]
   (->> (.getMethods class)
        (filter #(= (.getName ^Method %) (name method)))
-       (map (fn [^Method m] [:fn (vec (.getParameterTypes m)) (.getReturnType m)]))
-       (cons :overloaded)))
-
-(defn ann-method [ns env ctx type class name & args]
-  (project [class]
-    (app ns env ctx type (methods class name) args)))
+       (map (fn [^Method m] [(vec (.getParameterTypes m)) (.getReturnType m)]))
+       (cons :fn)))
 
 (defmethod special '. [ns env ctx type tag obj msg & args]
-  (fresh [class]
-    (or (if (symbol? obj)
-          (let [var (resolve obj)]
-            (if (class? var)
-              (== class var))))
-        (fresh [type]
-          (ann ns env ctx type obj)
-          (is class type convert))
-        fail)
-    (cond (seq? msg) (apply ann-method ns env ctx type class msg)
-          (symbol? msg) (conda [(ann-field type class msg)]
-                               [(apply ann-method ns env ctx type class msg args)]))))
+  (if (seq? msg)
+    (apply special ns env ctx type tag obj msg)
+    (fresh [class]
+      (or (if (symbol? obj)
+            (let [var (resolve obj)]
+              (if (class? var)
+                (== class var))))
+          (fresh [type]
+            (ann ns env ctx type obj)
+            (is class type convert)))
+      (project [class]
+        (conda [(all
+                  (is type class #(field % msg))
+                  (pred type class?))]
+               [(app ns env ctx type (methods class msg) args)])))))
 
 (defmethod special 'throw [ns env ctx type tag e]
   (ann' ns env ctx Throwable e))
 
+(defn ifn->fn [ifn fn]
+  (conde [(matche [ifn]
+            ([[:fn _ . rest]]
+               (conda [(== rest [])] [succeed])
+               (== fn ifn))
+            ([[:var _ fn]]))]
+         [(<:< ifn clojure.lang.IFn)
+          (matchu [fn] ([[:fn [_ _]]]))]))
+
 (defmethod special :default [ns env ctx type f & args]
-  (fresh [fn]
-    (ann ns env ctx fn f)
+  (fresh [ifn fn]
+    (ann ns env ctx ifn f)
+    (ifn->fn ifn fn)
     (app ns env ctx type fn args)))
 
 (defmethod special nil [ns env ctx type]
@@ -246,14 +261,31 @@
 
 (defn ann [ns env ctx type expr]
   (let [expr (macroexpand expr)]
-    (cond (symbol? expr) (conda [(local ctx type expr)]
+    (cond (symbol? expr) (condu [(local ctx type expr)]
                                 [(global ns env type expr)])
           (seq? expr) (apply special ns env ctx type expr)
           :else (== type (class expr)))))
 
-(defn check [expr]
-  (doall
-   (run* [q]
-     (fresh [env type]
-       (== q [env type])
-       (condu [(ann *ns* env [] type expr)])))))
+(defn check
+  ([expr]
+     (check [] expr))
+  ([ctx expr]
+     (first
+      (run* [q]
+        (fresh [env type]
+          (== q [env type])
+          (condu [(ann *ns* env ctx type expr)])
+          (freeze env))))))
+
+(defn read-env [expr]
+  (let [vars (atom {})]
+    (walk/prewalk
+      (fn [expr]
+        (if (and (symbol? expr) (re-matches #"_\d+" (name expr)))
+          (if-let [var (@vars expr)]
+            var
+            (let [var (lvar)]
+              (swap! vars assoc expr var)
+              var))
+          expr))
+      expr)))
