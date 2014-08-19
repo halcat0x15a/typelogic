@@ -5,7 +5,8 @@
             [clojure.repl :refer [source-fn]]
             [clojure.core.logic :refer :all]
             [clojure.core.logic.pldb :as pldb])
-  (:import [java.lang.reflect Modifier Method Field Constructor]))
+  (:import [java.lang.reflect Modifier Method Field Constructor]
+           [clojure.core.logic.protocols IVar]))
 
 (declare ann)
 
@@ -24,7 +25,7 @@
   (fn [type]
     (cond (sequential? type) (first type)
           (class? type) type
-          (lvar? type) :lvar)))
+          (lvar? type) (class type))))
 
 (defmethod convert :fn [_] clojure.lang.AFunction)
 (defmethod convert :seq [_] clojure.lang.ArraySeq)
@@ -37,7 +38,7 @@
 (defmethod convert Long/TYPE [_] Long)
 (defmethod convert Float/TYPE [_] Float)
 (defmethod convert Double/TYPE [_] Double)
-(defmethod convert :lvar [type] Object)
+(defmethod convert IVar [_] Object)
 (defmethod convert :default [type] type)
 
 (defn isa? [a b]
@@ -59,9 +60,25 @@
       (fresh [type']
         (== sub [:fn type'])
         (condu [(<:< type' type)]
-               [(has sub (lcons :fn types))])))
+               [(nonlvaro types)
+                (has sub (lcons :fn types))])))
     ([_]
-      (<:< sub super))))
+       (<:< sub super))))
+
+(def primitives
+  {'long Long/TYPE
+   'double Double/TYPE})
+
+(defn type-tag [type sym]
+  (all
+    (pred sym symbol?)
+    (or (if-let [tag (some-> sym meta :tag)]
+          (if-let [class (primitives tag)]
+            (== type class)
+            (if-let [var (resolve tag)]
+              (if (class? var)
+                (== type var)))))
+        fail)))
 
 (defn ann' [ns env ctx type expr]
   (fresh [sub]
@@ -115,32 +132,19 @@
   (if (empty? bindings)
     (apply special ns env ctx type 'do exprs)
     (fresh [val]
-      (ann ns env ctx val expr)
+      (conda [(type-tag val var)]
+             [(ann ns env ctx val expr)])
       (apply special ns env (lcons [:var var val] ctx) type tag bindings' exprs))))
 
 (defmethod special 'loop* [ns env ctx type tag bindings & exprs]
   (let [bindings (partition 2 bindings)]
     (ann ns env ctx type `((fn* (~(vec (map first bindings)) ~@exprs)) ~@(map second bindings)))))
 
-(def primitives
-  {'long Long/TYPE
-   'double Double/TYPE})
-
-(defn tag [sym]
-  (if-let [tag (some-> sym meta :tag)]
-    (if-let [class (primitives tag)]
-      class
-      (if-let [var (resolve tag)]
-        (if (class? var)
-          var)))))
-
 (defna bind [syms params bindings]
   ([[] [] []])
   ([['& sym] [[:seq]] [[:var sym [:seq]]]])
   ([[sym . syms'] [param . params'] [[:var sym param] . bindings']]
-     (condu [(all
-               (is param sym tag)
-               (pred param (complement nil?)))]
+     (condu [(project [sym] (type-tag param sym))]
             [succeed])
      (bind syms' params' bindings')))
 
@@ -163,7 +167,6 @@
            (vector? expr) (special ns env ctx type tag (cons expr exprs))
            (symbol? expr) (fresh [type']
                             (apply special ns env (lcons [:var expr type'] ctx) type tag exprs)
-                            #_(project [type' type] (log type' type))
                             (has type' type)))))
 
 (defmethod special 'def
@@ -247,7 +250,7 @@
                (conda [(== rest [])] [succeed])
                (== fn ifn))
             ([[:var _ fn]]))]
-         [(<:< ifn clojure.lang.IFn)
+         [(pred ifn #(isa? % clojure.lang.IFn))
           (matchu [fn] ([[:fn [_ _]]]))]))
 
 (defmethod special :default [ns env ctx type f & args]
@@ -289,3 +292,11 @@
               var))
           expr))
       expr)))
+
+(defn check-all [& exprs]
+  (loop [ctx []
+         [expr & exprs' :as exprs] exprs
+         types []]
+    (if-not (empty? exprs)
+      (let [[env type] (check ctx expr)]
+        (recur (concat (read-env env) ctx) exprs' (cons type types))))))
