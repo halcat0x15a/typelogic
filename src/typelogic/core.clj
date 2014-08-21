@@ -11,7 +11,7 @@
 (declare ann)
 
 (defn append [xs x]
-  (matchu [xs]
+  (matcha [xs]
     ([[x . xs']])
     ([[_ . xs']]
        (append xs' x))))
@@ -275,9 +275,9 @@
   ([ctx expr]
      (first
       (run* [q]
-        (fresh [env type]
-          (== q [env type])
-          (condu [(ann *ns* env ctx type expr)])
+        (fresh [env types]
+          (== q [env types])
+          (condu [(ann *ns* env ctx types expr)])
           (freeze env))))))
 
 (defn read-env [expr]
