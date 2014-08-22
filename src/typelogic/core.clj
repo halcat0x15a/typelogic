@@ -4,9 +4,9 @@
             [clojure.walk :refer [macroexpand-all] :as walk]
             [clojure.repl :refer [source-fn]]
             [clojure.core.logic :refer :all]
-            [clojure.core.logic.pldb :as pldb])
-  (:import [java.lang.reflect Modifier Method Field Constructor]
-           [clojure.core.logic.protocols IVar]))
+            [clojure.core.logic.pldb :as pldb]
+            [typelogic.logic :as logic])
+  (:import [java.lang.reflect Modifier Method Field Constructor]))
 
 (declare ann)
 
@@ -25,7 +25,8 @@
   (fn [type]
     (cond (sequential? type) (first type)
           (class? type) type
-          (lvar? type) (class type))))
+          (lvar? type) ::lvar
+          (nil? type) ::nil)))
 
 (defmethod convert :fn [_] clojure.lang.AFunction)
 (defmethod convert :seq [_] clojure.lang.ArraySeq)
@@ -38,36 +39,32 @@
 (defmethod convert Long/TYPE [_] Long)
 (defmethod convert Float/TYPE [_] Float)
 (defmethod convert Double/TYPE [_] Double)
-(defmethod convert IVar [_] Object)
-(defmethod convert :default [type] type)
+(defmethod convert ::lvar [_] Object)
+(defmethod convert ::nil [_] nil)
+(defmethod convert Object [type] type)
 
-(defn isa? [a b]
-  (or (and (nil? a) (core/isa? b Object))
-      (and (core/isa? a Number) (core/isa? b Number))
-      (core/isa? a b)))
+(defn isa? [child parent]
+  (let [child (convert child)
+        parent (convert parent)]
+    (or (and (nil? child) (core/isa? parent Object))
+        (and (core/isa? child Number) (core/isa? parent Number))
+        (core/isa? child parent))))
 
-(defn <:< [sub super]
-  (conde
+(defn isa [sub super]
+  (conda
    [(== sub super)]
-   [(project [sub]
-      (letfn [(pred [type] (isa? (convert sub) (convert type)))
-              (form [_ _ r s] (list sub '<:< (-reify s super r)))]
-        (predc super pred form)))]))
+   [(project [sub super] (== (isa? sub super) true))
+    (ext-run-csg super sub)]))
 
 (defn has [sub super]
-  (matche [super]
-    ([[:fn type . types]]
-      (fresh [type']
-        (== sub [:fn type'])
-        (condu [(<:< type' type)]
-               [(nonlvaro types)
-                (has sub (lcons :fn types))])))
-    ([_]
-       (<:< sub super))))
-
-(def primitives
-  {'long Long/TYPE
-   'double Double/TYPE})
+  (matcha [sub super]
+    ([[:fn [params return]] [:fn [params' return'] . _]]
+       (logic/map isa params params')
+       (isa return return'))
+    ([_ [:fn _ . types]]
+       (nonlvaro types)
+       (has sub (lcons :fn types)))
+    ([_ sub])))
 
 (defn type-tag [type sym]
   (all
@@ -83,10 +80,10 @@
 (defn ann' [ns env ctx type expr]
   (fresh [sub]
     (ann ns env ctx sub expr)
-    (<:< sub type)))
+    (isa sub type)))
 
 (defn local [ctx type sym]
-  (matchu [ctx]
+  (matcha [ctx]
     ([[[:var sym type] . _]])
     ([[_ . ctx']]
       (nonlvaro ctx')
@@ -144,7 +141,7 @@
   ([[] [] []])
   ([['& sym] [[:seq]] [[:var sym [:seq]]]])
   ([[sym . syms'] [param . params'] [[:var sym param] . bindings']]
-     (condu [(project [sym] (type-tag param sym))]
+     (conda [(project [sym] (type-tag param sym))]
             [succeed])
      (bind syms' params' bindings')))
 
@@ -171,7 +168,7 @@
 
 (defmethod special 'def
   ([ns env ctx type tag name]
-     (matchu [type] ([[:var name _]])))
+     (matcha [type] ([[:var name _]])))
   ([ns env ctx type tag name expr]
      (let [macro? (:macro (meta name))]
        (if macro?
@@ -190,13 +187,13 @@
     (== params [])
     (fresh [param params']
       (conso param params' params)
-      (conde [(pred param #(= % [:seq]))]
+      (conda [(pred param #(= % [:seq]))]
              [(ann' ns env ctx param arg)
               (ann-list ns env ctx params' args')]))))
 
 (defn app [ns env ctx type f args]
   (matche [f]
-    ([[:fn [params type] . _]]
+    ([[:fn [params type] . types]]
       (ann-list ns env ctx params args))
     ([[:fn _ . types]]
       (nonlvaro types)
@@ -245,13 +242,13 @@
   (ann' ns env ctx Throwable e))
 
 (defn ifn->fn [ifn fn]
-  (conde [(matche [ifn]
+  (conda [(matcha [ifn]
             ([[:fn _ . rest]]
                (conda [(== rest [])] [succeed])
                (== fn ifn))
             ([[:var _ fn]]))]
          [(pred ifn #(isa? % clojure.lang.IFn))
-          (matchu [fn] ([[:fn [_ _]]]))]))
+          (matcha [fn] ([[:fn [_ _]]]))]))
 
 (defmethod special :default [ns env ctx type f & args]
   (fresh [ifn fn]
@@ -264,7 +261,7 @@
 
 (defn ann [ns env ctx type expr]
   (let [expr (macroexpand expr)]
-    (cond (symbol? expr) (condu [(local ctx type expr)]
+    (cond (symbol? expr) (conda [(membero [:var expr type] ctx)]
                                 [(global ns env type expr)])
           (seq? expr) (apply special ns env ctx type expr)
           :else (== type (class expr)))))
@@ -273,11 +270,11 @@
   ([expr]
      (check [] expr))
   ([ctx expr]
-     (first
+     (distinct
       (run* [q]
         (fresh [env types]
           (== q [env types])
-          (condu [(ann *ns* env ctx types expr)])
+          (ann *ns* env ctx types expr)
           (freeze env))))))
 
 (defn read-env [expr]
