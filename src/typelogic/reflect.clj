@@ -9,26 +9,22 @@
            (.isPrimitive class))))
 
 (defn constructors [^Class class]
-  (map #(seq (.getParameterTypes ^Constructor %))
-       (.getConstructors class)))
+  (->> class (.getConstructors) (map #(vec (.getParameterTypes ^Constructor %)))))
 
 (defn methods [^Class class method]
-  (->> (.getMethods (get box class class))
+  (->> class
+       (.getMethods)
        (filter #(= (.getName ^Method %) (name method)))
        (map (fn [^Method m] [(vec (.getParameterTypes m)) (.getReturnType m)]))))
 
 (defn field [^Class class field]
-  (try
-    (.getField class (name field))
-    (catch NoSuchFieldException _)))
-
-(defn fields [^Class class field]
-  (->> class
-       .getFields
-       (filter #(= (.getName ^Field %) (name field)))
-       (map (memfn ^Field getType))))
+  (.getField class (name field)))
 
 (defn static-field [sym]
   (let [[_ class field] (re-matches #"(.+?)/(.+)" (str sym))]
     (if (and class field)
       [(symbol class) (symbol field)])))
+
+(defn tag [sym]
+  (if-let [var (some-> sym meta :tag resolve)]
+    (if (class? var) var)))
