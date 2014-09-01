@@ -22,13 +22,6 @@
   ([[_ . xs']]
      (freeze xs')))
 
-(defmulti convert
-  (fn [type]
-    (cond (sequential? type) (first type)
-          (class? type) type
-          (lvar? type) ::lvar
-          (nil? type) ::nil)))
-
 (def box
   {Boolean/TYPE Boolean
    Character/TYPE Character
@@ -39,91 +32,56 @@
    Float/TYPE Float
    Double/TYPE Double})
 
-(def upcast
-  {::fn clojure.lang.AFunction
-   ::seq clojure.lang.ArraySeq
-   ::var clojure.lang.Var
-   ::lvar Object})
+(defmulti convert
+  (fn [type]
+    (cond (sequential? type) (first type)
+          (class? type) type
+          (lvar? type) ::lvar)))
 
 (defmethod convert ::fn [_] clojure.lang.AFunction)
 (defmethod convert ::seq [_] clojure.lang.ArraySeq)
 (defmethod convert ::var [_] clojure.lang.Var)
-(defmethod convert Boolean/TYPE [_] Boolean)
-(defmethod convert Character/TYPE [_] Character)
-(defmethod convert Byte/TYPE [_] Byte)
-(defmethod convert Short/TYPE [_] Short)
-(defmethod convert Integer/TYPE [_] Integer)
-(defmethod convert Long/TYPE [_] Long)
-(defmethod convert Float/TYPE [_] Float)
-(defmethod convert Double/TYPE [_] Double)
 (defmethod convert ::lvar [_] Object)
-(defmethod convert ::nil [_] nil)
-(defmethod convert Object [type] type)
+(defmethod convert :default [type] type)
 
-(derive ::fn ::any)
-(derive ::seq ::any)
-(derive ::var ::any)
-(derive ::lvar ::any)
-
-(defmulti isa?
-  (letfn [(dispatch [type]
-            (cond (sequential? type) (first type)
-                  (class? type) type
-                  (lvar? type) ::lvar))]
-    (fn [child parent]
-      [(dispatch child) (dispatch parent)])))
-
-(defmethod isa? [::fn ::fn] [[_ params return :as fn] [_ params' return' :as fn']]
-  (and (every? #(apply isa? %) (map list params' params))
-       (isa? return return')))
-
-(defmethod isa? [::var ::var] [[_ _ type] [_ _ type']]
-  (isa? type type'))
-
-(defmethod isa? [::any Object] [[tag & _] class]
-  (isa? (upcast tag) class))
-
-(defmethod isa? [Object ::any] [class [tag & _]]
-  (isa? class (upcast tag)))
-
-(defmethod isa? :default [child parent]
+(defn isa? [child parent]
   (or (nil? child)
       (and (core/isa? (get box child child) Number)
            (core/isa? (get box parent parent) Number))
-      (core/isa? child parent)))
+      (core/isa? (convert child) (convert parent))))
 
-#_(defn subtype [sub super]
-  (conda
-   [(== sub super)]
-   [(project [sub super] (== (isa? sub super) true))]
-   [(project [sub super] (== (isa? super sub) true))
-    (project [sub super] (log "before:" sub))
-    (ext-run-csg sub super)
-    (project [sub] (log "after:" sub))]))
+(declare subtype)
+
+(defna subtypes [subs supers]
+  ([[] []])
+  ([[sub . subs'] [super . supers']]
+     (subtype sub super)
+     (subtypes subs' supers')))
+
+(defna subfn [sub super]
+  ([[::fn [params type] . types] [::fn [params' type'] . types']]
+    (conda [(all
+              (subtype type type')
+              (subtypes params' params))]
+           [(subfn sub [::fn types'])]
+           [(subfn [::fn types] super)])))
+
+(defna subvar [sub super]
+  ([[::var _ type] [::var _ type']]
+    (subtype type type')))
 
 (defn subtype [sub super]
-  (conda
-   [(== sub super)]
-   [(project [sub super] (== (isa? sub super) true))]
-   [(project [sub super] (== (isa? super sub) true))
-    (project [sub super] (log "before:" super))
-    (ext-run-csg super sub)
-    (project [sub] (log "after:" super))]))
+  (conda [(== sub super)]
+         [(subfn sub super)]
+         [(subvar sub super)]
+         [(project [super sub] (== (isa? sub super) true))]
+         [(project [super sub] (== (isa? super sub) true))
+          (ext-run-csg super sub)]))
 
 (defn ann- [env ctx type expr]
-  (fresh [subtype]
-    (ann env ctx subtype expr)
-    (conda [(== type subtype)]
-           [(project [type subtype] (== (isa? subtype type) true))]
-           [(project [type subtype] (== (isa? type subtype) true))
-            (ext-run-csg type subtype)])))
-
-(defn local [ctx type sym]
-  (matcha [ctx]
-    ([[[::var sym type] . _]])
-    ([[_ . ctx']]
-      (nonlvaro ctx')
-      (local ctx' type sym))))
+  (fresh [sub]
+    (ann env ctx sub expr)
+    (subtype sub type)))
 
 (defn global [env ctx type symbol]
   (binding [*ns* (::ns ctx)]
@@ -132,7 +90,7 @@
         (== type Class)
         (if-let [expr (source-fn symbol)]
           (ann env {::ns (:ns (meta var))} type (read-string expr))
-          (throw (RuntimeException. "Source not found"))))
+          (throw (ex-info "Source not found" {:symbol symbol}))))
       (throw (RuntimeException. (str "Unable to resolve symbol: " symbol " in this context"))))))
 
 (defmulti ann-app
@@ -141,7 +99,7 @@
 
 (defmethod ann-app 'if
   ([env ctx type tag]
-     (throw (RuntimeException. "Too few arguments to if")))
+     (throw (ex-info "Too few arguments to if" {})))
   ([env ctx type tag test]
      (ann-app env ctx type tag))
   ([env ctx type tag test then]
@@ -152,7 +110,7 @@
        (ann- env ctx type then)
        (ann- env ctx type else)))
   ([env ctx type tag test then else & args]
-     (throw (RuntimeException. "Too many arguments to if"))))
+     (throw (ex-info "Too many arguments to if" {}))))
 
 (defmethod ann-app 'do [env ctx type tag & [expr & exprs' :as exprs]]
   (cond (empty? exprs) (== type nil)
@@ -162,53 +120,72 @@
                 (apply ann-app env ctx type tag exprs'))))
 
 (defn ann-tag [type sym]
-  (all
-    (pred sym symbol?)
-    (is type sym reflect/tag)
-    (pred type (complement nil?))))
+  (if-let [tag (reflect/tag sym)]
+    (== type tag)
+    succeed))
 
 (defmethod ann-app 'let* [env ctx type tag [var expr & bindings' :as bindings] & exprs]
   (if (empty? bindings)
     (apply ann-app env ctx type 'do exprs)
     (fresh [val]
-      (conda [(ann-tag val var)]
-             [(ann env ctx val expr)])
+      (ann-tag val var)
+      (ann- env ctx val expr)
       (apply ann-app env (assoc ctx var val) type tag bindings' exprs))))
-
-(defmethod ann-app 'loop* [env ctx type tag bindings & exprs]
-  (let [bindings (partition 2 bindings)]
-    (ann env ctx type `((fn* (~(vec (map first bindings)) ~@exprs)) ~@(map second bindings)))))
 
 (defn ann-fn [env ctx return params [sym & syms' :as syms] body]
   (cond (empty? syms) (all
                         (emptyo params)
-                        (apply ann-app env (assoc ctx 'recur [::fn params return]) return 'do body))
+                        (apply ann-app env ctx return 'do body))
         (= sym '&) (fresh [param]
                      (== params [[::seq]])
                      (apply ann-app env (assoc ctx (first syms') param) return 'do body))
         :else (fresh [param params']
                 (conso param params' params)
-                (if-let [tag (reflect/tag sym)]
-                  (== param tag)
-                  succeed)
+                (ext-run-csg params (lcons param params'))
+                (ann-tag param sym)
                 (ann-fn env (assoc ctx sym param) return params' syms' body))))
 
-(defn ann-fns [env ctx return params [syms & body] & exprs]
-  (conde [(ann-fn env ctx return params syms body)]
-         [(if (empty? exprs)
-            fail
-            (apply ann-fns env ctx return params exprs))]))
+(defn ann-fns [env ctx types [[syms & body] & exprs' :as exprs]]
+  (if (empty? exprs)
+    (emptyo types)
+    (fresh [params return types']
+      (conso [params return] types' types)
+      (ann-fn env (assoc ctx ::recur [params return]) return params syms body)
+      (ann-fns env ctx types' exprs'))))
 
 (defmethod ann-app 'fn* [env ctx type tag expr & exprs]
   (if (symbol? expr)
     (fresh [type']
       (apply ann-app env (assoc ctx expr type') type tag exprs)
-      (fresh [type]
-        (apply ann-app env (assoc ctx expr type) type' tag exprs)))
-    (fresh [params return]
-      (== type [::fn params return])
-      (cond (seq? expr) (apply ann-fns env ctx return params expr exprs)
-            (vector? expr) (ann-fn env ctx return params expr exprs)))))
+      (subtype type' type))
+    (fresh [types]
+      (conso ::fn types type)
+      (cond (seq? expr) (ann-fns env ctx types (cons expr exprs))
+            (vector? expr) (ann-fns env ctx types (list (cons expr exprs)))))))
+
+(defmethod ann-app 'loop* [env ctx type tag bindings & exprs]
+  (let [bindings (partition 2 bindings)]
+    (ann env ctx type `((fn* (~(vec (map first bindings)) ~@exprs)) ~@(map second bindings)))))
+
+(defn app [env ctx params [arg & args' :as args]]
+  (if (empty? args)
+    (matcha [params]
+      ([[]])
+      ([[[:seq]]]))
+    (conda [(pred params #(= % [[:seq]]))
+            (fresh [type] (ann env ctx type arg))
+            (app env ctx params args')]
+           [(fresh [param params']
+              (conso param params' params)
+              (ext-run-csg params (lcons param params'))
+              (ann- env ctx param arg)
+              (app env ctx params' args'))])))
+
+(defmethod ann-app 'recur [env ctx type tag & args]
+  (let [[params return] (::recur ctx)]
+    (all
+      (== type return)
+      (app env ctx params args))))
 
 (defmethod ann-app 'def
   ([env ctx type tag name]
@@ -220,25 +197,20 @@
          (fresh [type' self]
            (== type [::var name type'])
            (ann env (assoc ctx name self) type' expr)
-           (fresh [type] (ann env (assoc ctx name type) self expr))
+           (subtype self type')
+           (conda [(== self type')] [succeed])
            (append env type))))))
 
 (defmethod ann-app 'quote [env ctx type tag & exprs]
   (== type (class (first exprs))))
 
-(defn app [env ctx params [arg & args' :as args]]
-  (if (empty? args)
-    (matcha [params]
-      ([[]])
-      ([[[:seq]]]))
-    (conda [(pred params #(= % [:seq]))
-            (fresh [type] (ann env ctx type arg))
-            (app env ctx params args')]
-           [(fresh [param params']
-              (conso param params' params)
-              #_(ext-run-csg params (lcons param params'))
-              (ann- env ctx param arg)
-              (app env ctx params' args'))])))
+(defn apps [env ctx return types args]
+  (fresh [params types']
+    (conso [params return] types' types)
+    (ext-run-csg types (lcons [params return] types'))
+    (conde [(app env ctx params args)]
+           [(apps env ctx return types' args)]
+           #_[(project [types] (throw (ex-info "type mismatch;" {:op [::fn (seq types)] :args args})))])))
 
 (defmethod ann-app 'new [env ctx type tag name & args]
   (let [class (resolve name)]
@@ -261,9 +233,7 @@
             (ann env ctx type obj)
             (is class type convert)))
       (project [class]
-        (conda [(fresh [params]
-                  (logic/any [params type] (reflect/methods class msg))
-                  (app env ctx params args))]
+        (conda [(apps env ctx type (reflect/methods class msg) args)]
                #_[(all
                   (is type class #(reflect/field % msg))
                   (pred type class?))])))))
@@ -273,18 +243,18 @@
 
 (defn ifn->fn [ifn fn]
   (conda [(matcha [ifn]
-            ([[::fn _ _]] (== fn ifn))
+            ([[::fn . _]] (ext-run-csg fn ifn))
             ([[::var _ fn]]))]
          [(pred ifn #(isa? % clojure.lang.IFn))
-          (matcha [fn] ([[::fn _ _]]))]))
+          (matcha [fn] ([[::fn . _]]))]))
 
 (defmethod ann-app :default [env ctx type f & args]
-  (fresh [ifn fn params]
-    (ann env ctx fn f)
-    #_(trace-s)
+  (fresh [ifn fn types]
+    (ann env ctx ifn f)
     (ifn->fn ifn fn)
-    (ext-run-csg fn [::fn params type])
-    (app env ctx params args)))
+    (conso ::fn types fn)
+    (ext-run-csg fn (lcons ::fn types))
+    (apps env ctx type types args)))
 
 (defmethod ann-app nil [env ctx type]
   (== type clojure.lang.PersistentList$EmptyList))
@@ -301,11 +271,11 @@
   ([expr]
      (check {} expr))
   ([ctx expr]
-     (distinct
+     (first
       (run* [q]
         (fresh [env type]
           (== q [env type])
-          (ann env (assoc ctx ::ns *ns*) type expr)
+          (condu [(ann env (assoc ctx ::ns *ns*) type expr)])
           (freeze env))))))
 
 (defn read-env [expr]
@@ -328,5 +298,3 @@
     (if-not (empty? exprs)
       (let [[env type] (check ctx expr)]
         (recur (concat (read-env env) ctx) exprs' (cons type types))))))
-
-(check '(defn f [a] (if true 0 (f ""))))
